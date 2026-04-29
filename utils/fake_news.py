@@ -4,7 +4,7 @@ import pandas as pd
 
 from torch.utils.data import Dataset
 
-from utils import load_dataset
+from datasets import load_dataset
 
 class FakeNewsDataset(Dataset):
     num_labels = 10 # the number of labels in the dataset
@@ -46,8 +46,11 @@ class FakeNewsDataset(Dataset):
             return output
         
     @staticmethod
-    def collator(batch : Dict[str, pd.Series]) -> Dict[str, List[str] | List[int]]:
-        return {"headline": batch["headline"].tolist(), "body": batch["body"].tolist(), "label": batch["label"].tolist()}
+    def collator(batch : List[Dict[str, str | int]]) -> Dict[str, List[str] | List[int]]:
+        return {
+            "text": [item["headline"] + "\n" + item["body"] for item in batch],
+            "label": [item["label"] for item in batch]
+        }
     
     @staticmethod
     def to_string_label(label : int) -> str:

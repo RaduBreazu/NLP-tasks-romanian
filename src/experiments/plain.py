@@ -5,17 +5,18 @@ import pytorch_lightning as pl
 from aim.pytorch_lightning import AimLogger
 
 from functools import partial
-from typing import Tuple, Dict, Optional, Callable, Any
+from typing import List, Tuple, Dict, Optional, Callable, Any
 
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
+from torchmetrics import MetricCollection
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score
 
 from seqeval.metrics import precision_score, recall_score, f1_score, accuracy_score
 from seqeval.scheme import IOB2
 
 from . import MarcellDataset, FakeNewsDataset
-from . import read_legalnero_dataset, read_fake_news_dataset
+from . import read_legal_ner_dataset, read_fake_news_dataset
 
 from . import PlainNetwork
 
@@ -23,32 +24,48 @@ from . import MyCallback
 
 class NERPlainTagger(PlainNetwork):
     def __init__(self, model_name: str, num_labels: int, batch_size: int, learning_rate: float, logging : bool, to_string_labels : Callable[[int], str]) -> None:
-        super(PlainNetwork, self).__init__(model_name, num_labels, batch_size, learning_rate, logging)
+        super().__init__(model_name, num_labels, batch_size, learning_rate, logging)
         self.to_string_labels = to_string_labels
 
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor. torch.Tensor, Optional[torch.Tensor]]:
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        labels = batch["label"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        labels = pad_sequence(labels, batch_first = True, padding_value = 0).to(self.device)
+        if "label" in batch:
+            labels = batch["label"]
+            max_len = texts["input_ids"].shape[1]
+            labels = pad_sequence([torch.tensor(label, dtype = torch.long) for label in labels], batch_first = True, padding_value = -100).to(self.device)
+            if labels.shape[1] > max_len:
+                labels = labels[:, :max_len]
+            elif labels.shape[1] < max_len:
+                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long)
+                labels = torch.cat([labels, padding], dim = 1).to(self.device)
+        else:
+            return texts["input_ids"], texts["attention_mask"], None
+        
         return texts["input_ids"], texts["attention_mask"], labels
     
-    def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, batch : Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
+        
         out = self.transformer(input_ids, attention_mask).last_hidden_state
         out = self.linear(out)
         preds = torch.argmax(out, dim = -1)
-        probs = torch.max(out, dim = -1)
-        loss = self.criterion(out.view(-1, self.num_labels), labels.view(-1))
+        probs = torch.softmax(out, dim = -1)
+        if labels is None:
+            return preds, probs, None
+        
+        loss = self.criterion(out.reshape(-1, self.num_labels), labels.reshape(-1))
         return preds, probs, loss
     
-    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+    def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
         if isinstance(y_pred, torch.Tensor):
             y_pred = y_pred.detach().cpu().tolist()
         if isinstance(y_true, torch.Tensor):
             y_true = y_true.detach().cpu().tolist()
 
-        # Filter out -100 (ignore tokens)
         true_labels = []
         pred_labels = []
         
@@ -65,6 +82,13 @@ class NERPlainTagger(PlainNetwork):
                 pred_labels.append(filtered_pred)
 
         if not true_labels:
+            return [], [] 
+        
+        return pred_labels, true_labels
+    
+    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+        pred_labels, true_labels = self.filter_out_padding_tokens(y_pred, y_true)
+        if true_labels == []:
             return
 
         acc = accuracy_score(true_labels, pred_labels)
@@ -82,50 +106,64 @@ class NERPlainTagger(PlainNetwork):
 
 class FakeNewsPlainDetector(PlainNetwork):
     def __init__(self, model_name: str, num_labels: int, batch_size: int, learning_rate: float, logging : bool) -> None:
-        super(PlainNetwork, self).__init__(model_name, num_labels, batch_size, learning_rate, logging)
+        super().__init__(model_name, num_labels, batch_size, learning_rate, logging)
 
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor. torch.Tensor, Optional[torch.Tensor]]:
+        # define a metric collection in order to be able to accumulate state
+        metrics = MetricCollection({
+            "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "precision": Precision(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "recall": Recall(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "f1_score": F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro")
+        })
+        self.train_metrics = metrics.clone(prefix = "Training ")
+        self.validation_metrics = metrics.clone(prefix = "Validation ")
+        self.test_metrics = metrics.clone(prefix = "Test ")
+
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        try:
+        if "label" in batch:
             labels = batch["label"]
-            labels = labels.to(self.device)
-        except KeyError:
+            if len(labels) > 0:
+                labels = torch.tensor(labels, dtype = torch.long, device = self.device)
+        else:
             return texts["input_ids"], texts["attention_mask"], None
         
         return texts["input_ids"], texts["attention_mask"], labels
-
-    def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        out = self.transformer(input_ids, attention_mask).last_hidden_state
-        out = self.linear(out)
-        preds = torch.argmax(out, dim = -1)
-        probs = torch.max(out, dim = -1)
-        if not labels:
-            return preds, probs, (None, None)
+    
+    def forward(self, batch : Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
         
-        loss = self.criterion(out.view(-1, self.num_labels), labels.view(-1))
+        out = self.transformer(input_ids, attention_mask).last_hidden_state
+        cls_embeddings = out[:, 0, :]
+        out = self.linear(cls_embeddings)
+        preds = torch.argmax(out, dim = -1)
+        probs = torch.softmax(out, dim = -1)
+        if labels is None:
+            return preds, probs, None
+        
+        loss = self.criterion(out, labels)
         return preds, probs, loss
-
+    
     def compute_and_log_metrics(self, y_pred: torch.Tensor, y_true: torch.Tensor, step_type: str) -> None:
-        y_pred = y_pred.detach()
-        y_true = y_true.detach()
-
-        accuracy = Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        precision = Precision(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        recall = Recall(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        f1_score = F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-
-        acc = accuracy(y_pred, y_true)
-        prec = precision(y_pred, y_true)
-        rec = recall(y_pred, y_true)
-        f1 = f1_score(y_pred, y_true)
+        if len(y_true) == 0:
+            return
+        
+        y_pred = y_pred.detach().float()
+        y_true = y_true.detach().long()
+        mapping = {
+            "Training": self.train_metrics,
+            "Validation": self.validation_metrics,
+            "Test": self.test_metrics
+        }
+        metric_collection = mapping.get(step_type)
+        output = metric_collection(y_pred, y_true)
 
         with warnings.catch_warnings(action = "ignore"):
-            self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} precision", prec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} recall", rec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
+            self.log_dict(output, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
 
 
 def get_args() -> argparse.Namespace:
@@ -156,7 +194,7 @@ def get_args() -> argparse.Namespace:
 def get_datasets(g : torch.Generator, args : argparse.Namespace, task : str) -> Tuple[Dataset, Dataset, Dataset, Dict[str, Any], int]:
     match task:
         case "NER":
-            training_data, validation_data, test_data = read_legalnero_dataset()
+            training_data, validation_data, test_data, _ = read_legal_ner_dataset()
             training_dataset, validation_dataset, test_dataset = [MarcellDataset(x) for x in [training_data, validation_data, test_data]]
             num_labels = MarcellDataset.num_labels
             collator = MarcellDataset.collator
@@ -180,7 +218,7 @@ def get_datasets(g : torch.Generator, args : argparse.Namespace, task : str) -> 
     return training_dataset, validation_dataset, test_dataset, training_args, num_labels
 
 def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : str) -> None:
-    training_dataset, validation_dataset, test_dataset, training_args, num_labels = get_datasets(g, args, "NER")
+    training_dataset, validation_dataset, test_dataset, training_args, num_labels = get_datasets(g, args, task)
 
     train_dataloader = DataLoader(training_dataset, shuffle = True, **training_args)
     validation_dataloader = DataLoader(validation_dataset, shuffle = False, **training_args)
@@ -191,11 +229,11 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             model = NERPlainTagger(args.model_name, num_labels, args.batch_size, args.lr, args.logging, MarcellDataset.to_string_label)
             task_name = "NER"
         case "fake_news":
-            model = FakeNewsPlainDetector(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, args.logging)
+            model = FakeNewsPlainDetector(args.model_name, num_labels, args.batch_size, args.lr, args.logging)
             task_name = "fake news"
     
     aim_logger = AimLogger(f"aim_logs_plain_{task}", f"Plain model for {task_name}", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.max_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)

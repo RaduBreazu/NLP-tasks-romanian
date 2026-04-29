@@ -5,10 +5,11 @@ import pytorch_lightning as pl
 from aim.pytorch_lightning import AimLogger
 
 from functools import partial
-from typing import Tuple, Dict, Optional, Callable, Any
+from typing import List, Tuple, Dict, Optional, Callable, Any
 
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
+from torchmetrics import MetricCollection
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score
 
 from seqeval.metrics import precision_score, recall_score, f1_score, accuracy_score
@@ -24,49 +25,62 @@ from . import MyCallback
 class NERContrastive(ContrastiveNetwork):
     def __init__(self, model_name: str, num_labels: int, batch_size: int, learning_rate: float, contrastive_weight: float, temperature: float,
                  logging : bool, to_string_labels : Callable[[int], str]) -> None:
-        super(ContrastiveNetwork, self).__init__(model_name, num_labels, batch_size, learning_rate, contrastive_weight, temperature, logging)
+        super().__init__(model_name, num_labels, batch_size, learning_rate, contrastive_weight, temperature, logging)
         self.to_string_labels = to_string_labels
 
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor. torch.Tensor, Optional[torch.Tensor]]:
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        labels = batch["label"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        labels = pad_sequence(labels, batch_first = True, padding_value = 0).to(self.device)
+        if "label" in batch:
+            labels = batch["label"]
+            max_len = texts["input_ids"].shape[1]
+            labels = pad_sequence([torch.tensor(label, dtype = torch.long) for label in labels], batch_first = True, padding_value = -100).to(self.device)
+            if labels.shape[1] > max_len:
+                labels = labels[:, :max_len]
+            elif labels.shape[1] < max_len:
+                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long)
+                labels = torch.cat([labels, padding], dim = 1).to(self.device)
+        else:
+            return texts["input_ids"], texts["attention_mask"], None
+        
         return texts["input_ids"], texts["attention_mask"], labels
 
-    def forward(self, input_ids, attention_mask, labels, compute_contrastive = True) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
-        out = self.transformer(input_ids, attention_mask).last_hidden_state
-        out = self.linear(out)
-        preds = torch.argmax(out, dim = -1)
-        probs = torch.max(out, dim = -1)
-        ce_loss = self.cross_entropy_loss(out.view(-1, self.num_labels), labels.view(-1))
+    def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
         
+        transformer_out = self.transformer(input_ids, attention_mask).last_hidden_state
+        out = self.linear(transformer_out)
+        preds = torch.argmax(out, dim = -1)
+        probs = torch.softmax(out, dim = -1)
+        if labels is None:
+            return preds, probs, (None, None)
+        
+        ce_loss = self.cross_entropy_loss(out.reshape(-1, self.num_labels), labels.reshape(-1))
         contrastive_loss = None
         if compute_contrastive and self.contrastive_weight > 0.0:
-            valid_mask = (labels != -100)
+            valid_mask = labels != -100
             if valid_mask.sum() > 1:
                 # we need to flatten everything first...
-                flat_embeddings = out.view(-1, out.size(-1))
-                flat_labels = labels.view(-1)
-                flat_mask = valid_mask.view(-1)  # ...including the mask
+                flat_embeddings = transformer_out.reshape(-1, transformer_out.size(-1))
+                flat_labels = labels.reshape(-1)
+                flat_mask = valid_mask.reshape(-1)  # ...including the mask
                 
                 valid_embeddings = flat_embeddings[flat_mask]
                 valid_labels = flat_labels[flat_mask]
                 
-                projected = self.projection_head(valid_embeddings)
-                
-                contrastive_loss = self.contrastive_loss(projected, valid_labels)
+                contrastive_loss = self.contrastive_loss(valid_embeddings, valid_labels, self.linear[1].weight)
 
         return preds, probs, (ce_loss, contrastive_loss)
 
-    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+    def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
         if isinstance(y_pred, torch.Tensor):
             y_pred = y_pred.detach().cpu().tolist()
         if isinstance(y_true, torch.Tensor):
             y_true = y_true.detach().cpu().tolist()
 
-        # Filter out -100 (ignore tokens)
         true_labels = []
         pred_labels = []
         
@@ -83,6 +97,13 @@ class NERContrastive(ContrastiveNetwork):
                 pred_labels.append(filtered_pred)
 
         if not true_labels:
+            return [], [] 
+        
+        return pred_labels, true_labels
+    
+    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+        pred_labels, true_labels = self.filter_out_padding_tokens(y_pred, y_true)
+        if true_labels == []:
             return
 
         acc = accuracy_score(true_labels, pred_labels)
@@ -90,77 +111,80 @@ class NERContrastive(ContrastiveNetwork):
         recall = recall_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
         f1 = f1_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
 
-        batch_size = self.batch_size # len(true_labels)
-        with warnings.catch_warnings(action = "ignore"):
-            self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} precision", precision, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} recall", recall, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+        if self.logging:
+            batch_size = self.batch_size # len(true_labels)
+            with warnings.catch_warnings(action = "ignore"):
+                self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+                self.log(f"{step_type} precision", precision, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+                self.log(f"{step_type} recall", recall, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+                self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
 
 
 class FakeNewsContrastive(ContrastiveNetwork):
     def __init__(self, model_name: str, num_labels: int, batch_size: int, learning_rate: float, contrastive_weight: float, temperature: float,
                  logging : bool) -> None:
-        super(ContrastiveNetwork, self).__init__(model_name, num_labels, batch_size, learning_rate, contrastive_weight, temperature, logging)
+        super().__init__(model_name, num_labels, batch_size, learning_rate, contrastive_weight, temperature, logging)
+        
+        metrics = MetricCollection({
+            "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "precision": Precision(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "recall": Recall(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "f1_score": F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro")
+        })
+        self.train_metrics = metrics.clone(prefix = "Training ")
+        self.validation_metrics = metrics.clone(prefix = "Validation ")
+        self.test_metrics = metrics.clone(prefix = "Test ")
 
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor. torch.Tensor, Optional[torch.Tensor]]:
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        try:
+        if "label" in batch:
             labels = batch["label"]
-            labels = labels.to(self.device)
-        except KeyError:
+            if len(labels) > 0:
+                labels = torch.tensor(labels, dtype = torch.long, device = self.device)
+        else:
             return texts["input_ids"], texts["attention_mask"], None
         
         return texts["input_ids"], texts["attention_mask"], labels
 
-    def forward(self, input_ids, attention_mask, labels, compute_contrastive = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        out = self.transformer(input_ids, attention_mask).last_hidden_state
-        out = self.linear(out)
+    def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True) -> Tuple[torch.Tensor, torch.Tensor, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
+        
+        transformer_out = self.transformer(input_ids, attention_mask).last_hidden_state
+        cls_embeddings = transformer_out[:, 0, :] # get the embeddings for the [CLS] token (only these are necessary for the linear layer)
+        out = self.linear(cls_embeddings)
         preds = torch.argmax(out, dim = -1)
-        probs = torch.max(out, dim = -1)
-        if not labels:
+        probs = torch.softmax(out, dim = -1)
+        if labels is None:
             return preds, probs, (None, None)
         
-        ce_loss = self.cross_entropy_loss(out.view(-1, self.num_labels), labels.view(-1))
+        ce_loss = self.cross_entropy_loss(out, labels)
         contrastive_loss = None
         if compute_contrastive and self.contrastive_weight > 0.0:
-            valid_mask = (labels != -100)
-            if valid_mask.sum() > 1:
-                # we need to flatten everything first...
-                flat_embeddings = out.view(-1, out.size(-1))
-                flat_labels = labels.view(-1)
-                flat_mask = valid_mask.view(-1)  # ...including the mask
-                
-                valid_embeddings = flat_embeddings[flat_mask]
-                valid_labels = flat_labels[flat_mask]
-                
-                projected = self.projection_head(valid_embeddings)
-                
-                contrastive_loss = self.contrastive_loss(projected, valid_labels)
+            contrastive_loss = self.contrastive_loss(cls_embeddings, labels, self.linear[1].weight)
 
         return preds, probs, (ce_loss, contrastive_loss)
 
     def compute_and_log_metrics(self, y_pred: torch.Tensor, y_true: torch.Tensor, step_type: str) -> None:
-        y_pred = y_pred.detach()
-        y_true = y_true.detach()
+        if len(y_true) == 0:
+            return
+        
+        y_pred = y_pred.detach().float()
+        y_true = y_true.detach().long()
+        mapping = {
+            "Training": self.train_metrics,
+            "Validation": self.validation_metrics,
+            "Test": self.test_metrics
+        }
+        metric_collection = mapping.get(step_type)
+        output = metric_collection(y_pred, y_true)
 
-        accuracy = Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        precision = Precision(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        recall = Recall(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        f1_score = F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-
-        acc = accuracy(y_pred, y_true)
-        prec = precision(y_pred, y_true)
-        rec = recall(y_pred, y_true)
-        f1 = f1_score(y_pred, y_true)
-
-        with warnings.catch_warnings(action = "ignore"):
-            self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} precision", prec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} recall", rec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
+        if self.logging:
+            with warnings.catch_warnings(action = "ignore"):
+                self.log_dict(output, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
 
 
 def get_args() -> argparse.Namespace:
@@ -237,7 +261,7 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             raise NotImplementedError("This task is not implemented.")
     
     aim_logger = AimLogger(f"aim_logs_contrastive_{task}", f"Contrastive learning for {task_name}", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.max_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)

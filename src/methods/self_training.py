@@ -1,3 +1,5 @@
+from abc import ABC, abstractmethod
+
 import pandas as pd
 
 import torch
@@ -5,9 +7,9 @@ import pytorch_lightning as pl
 
 from torch.utils.data import Dataset, DataLoader
 
-class SelfTrainingModel(pl.LightningModule):
+class SelfTrainingModel(ABC, pl.LightningModule):
     def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset) -> None:
-        super(pl.LightningModule, self).__init__()
+        super().__init__()
         self.model = model
         self.labelled_data = labelled_data
         self.unlabelled_data = unlabelled_data
@@ -63,6 +65,10 @@ class SelfTrainingModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx: int):
         return self.model.test_step(batch, batch_idx)
+    
+    @abstractmethod
+    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+        pass
     
     def configure_optimizers(self):
         return self.model.configure_optimizers()

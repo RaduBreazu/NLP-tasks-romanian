@@ -1,10 +1,19 @@
+import warnings
 import argparse
 import torch
 import pytorch_lightning as pl
 from aim.pytorch_lightning import AimLogger
 from copy import deepcopy
 
-from torch.utils.data import DataLoader
+from typing import List, Tuple
+
+from torch.utils.data import Dataset, DataLoader
+
+from torchmetrics import MetricCollection
+from torchmetrics.classification import Accuracy, Precision, Recall, F1Score
+
+from seqeval.metrics import precision_score, recall_score, f1_score, accuracy_score
+from seqeval.scheme import IOB2
 
 from . import FakeNewsDataset, read_fake_news_dataset
 from . import MarcellDataset, JuRODataset, read_legal_ner_dataset
@@ -13,11 +22,94 @@ from . import SelfTrainingModel
 
 from . import MyCallback
 
-from plain import NERPlainTagger, FakeNewsPlainDetector
-from curriculum_learning import NERTeacherModel, NERStudentModel, NERCurriculumLearner, FakeNewsTeacherModel, FakeNewsStudentModel, FakeNewsCurriculumLearner
-from contrastive_learning import NERContrastive, FakeNewsContrastive
-from curriculum_and_contrastive import NERCurriculumContrastiveLearner, FakeNewsCurriculumContrastiveLearner
-from mixture import LinearVoting, NERMixture, FakeNewsMixture
+from .plain import NERPlainTagger, FakeNewsPlainDetector
+from .curriculum_learning import NERTeacherModel, NERStudentModel, NERCurriculumLearner, FakeNewsTeacherModel, FakeNewsStudentModel, FakeNewsCurriculumLearner
+from .contrastive_learning import NERContrastive, FakeNewsContrastive
+from .curriculum_and_contrastive import NERCurriculumContrastiveLearner, FakeNewsCurriculumContrastiveLearner
+from .mixture import LinearVoting, NERMixture, FakeNewsMixture
+
+class NERSelfTraining(SelfTrainingModel):
+    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, logging: bool) -> None:
+        super().__init__(model, labelled_data, unlabelled_data)
+        self.logging = logging
+
+    def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
+        if isinstance(y_pred, torch.Tensor):
+            y_pred = y_pred.detach().cpu().tolist()
+        if isinstance(y_true, torch.Tensor):
+            y_true = y_true.detach().cpu().tolist()
+
+        true_labels = []
+        pred_labels = []
+        
+        for pred_seq, true_seq in zip(y_pred, y_true):
+            filtered_true = []
+            filtered_pred = []
+            for p, t in zip(pred_seq, true_seq):
+                if t != -100:  # Skip ignored tokens
+                    filtered_true.append(self.to_string_labels(int(t)))
+                    filtered_pred.append(self.to_string_labels(int(p)))
+            
+            if filtered_true:  # Only add non-empty sequences
+                true_labels.append(filtered_true)
+                pred_labels.append(filtered_pred)
+
+        if not true_labels:
+            return [], [] 
+        
+        return pred_labels, true_labels
+    
+    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+        pred_labels, true_labels = self.filter_out_padding_tokens(y_pred, y_true)
+        if true_labels == []:
+            return
+
+        acc = accuracy_score(true_labels, pred_labels)
+        precision = precision_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
+        recall = recall_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
+        f1 = f1_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
+
+        if self.logging:
+            batch_size = self.batch_size # len(true_labels)
+            with warnings.catch_warnings(action = "ignore"):
+                self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+                self.log(f"{step_type} precision", precision, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+                self.log(f"{step_type} recall", recall, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+                self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+
+
+class FakeNewsSelfTraining(SelfTrainingModel):
+    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, logging: bool) -> None:
+        super().__init__(model, labelled_data, unlabelled_data)
+        self.logging = logging
+
+        metrics = MetricCollection({
+            "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "precision": Precision(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "recall": Recall(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "f1_score": F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro")
+        })
+        self.train_metrics = metrics.clone(prefix = "Training ")
+        self.validation_metrics = metrics.clone(prefix = "Validation ")
+        self.test_metrics = metrics.clone(prefix = "Test ")
+
+    def compute_and_log_metrics(self, y_pred: torch.Tensor, y_true: torch.Tensor, step_type: str) -> None:
+        if len(y_true) == 0:
+            return
+        
+        y_pred = y_pred.detach().float()
+        y_true = y_true.detach().long()
+        mapping = {
+            "Training": self.train_metrics,
+            "Validation": self.validation_metrics,
+            "Test": self.test_metrics
+        }
+        metric_collection = mapping.get(step_type)
+        output = metric_collection(y_pred, y_true)
+
+        if self.logging:
+            with warnings.catch_warnings(action = "ignore"):
+                self.log_dict(output, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -124,9 +216,9 @@ def perform_legal_nero_experiments(g : torch.Generator, args : argparse.Namespac
             supervised_model = NERMixture(experts, args.batch_size, LinearVoting(len(experts)), args.logging)
             experiment_name = "mixture of curriculum and contrastive learning experts"
 
-    model = SelfTrainingModel(supervised_model, training_data, unlabelled_dataset)
+    model = NERSelfTraining(supervised_model, training_data, unlabelled_dataset, args.logging)
     aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training of {experiment_name} for fake news", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.max_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)
@@ -195,9 +287,9 @@ def perform_fake_news_experiments(g : torch.Generator, args : argparse.Namespace
             supervised_model = FakeNewsMixture(experts, args.batch_size, LinearVoting(len(experts)), args.logging)
             experiment_name = "mixture of curriculum and contrastive learning experts"
 
-    model = SelfTrainingModel(supervised_model, training_dataset, unlabelled_dataset)
+    model = FakeNewsSelfTraining(supervised_model, training_dataset, unlabelled_dataset, args.logging)
     aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training with {experiment_name} for fake news", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.max_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)

@@ -6,9 +6,10 @@ import pytorch_lightning as pl
 from aim.pytorch_lightning import AimLogger
 
 from functools import partial
-from typing import Tuple, Dict, Optional, Callable, Any
+from typing import List, Tuple, Dict, Optional, Callable, Any
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+from torchmetrics import MetricCollection
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score
 
 from seqeval.metrics import precision_score, recall_score, f1_score, accuracy_score
@@ -23,33 +24,45 @@ from . import MyCallback
 
 class NERTeacherModel(DifficultyPredictor):
     def __init__(self, model_name: str) -> None:
-        super(DifficultyPredictor, self).__init__(model_name)
+        super().__init__(model_name)
 
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor]:
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        try:
+        if "label" in batch:
             labels = batch["label"]
-            labels = pad_sequence(labels, batch_first = True, padding_value = 0).to(self.device)
-        except KeyError:
-            return texts["input_ids"], texts["attention_mask"]
+            max_len = texts["input_ids"].shape[1]
+            labels = pad_sequence([torch.tensor(label, dtype = torch.long) for label in labels], batch_first = True, padding_value = -100).to(self.device)
+            if labels.shape[1] > max_len:
+                labels = labels[:, :max_len]
+            elif labels.shape[1] < max_len:
+                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long)
+                labels = torch.cat([labels, padding], dim = 1).to(self.device)
+        else:
+            return texts["input_ids"], texts["attention_mask"], None
         
         return texts["input_ids"], texts["attention_mask"], labels
 
 
 class NERStudentModel(CurriculumTagger):
     def __init__(self, model_name: str, train_dataset: Dataset, num_labels: int, batch_size: int) -> None:
-        super(CurriculumTagger, self).__init__(model_name, train_dataset, num_labels, batch_size)
+        super().__init__(model_name, train_dataset, num_labels, batch_size)
 
     def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        try:
+        if "label" in batch:
             labels = batch["label"]
-            labels = labels.to(self.device)
-        except KeyError:
+            max_len = texts["input_ids"].shape[1]
+            labels = pad_sequence([torch.tensor(label, dtype = torch.long) for label in labels], batch_first = True, padding_value = -100).to(self.device)
+            if labels.shape[1] > max_len:
+                labels = labels[:, :max_len]
+            elif labels.shape[1] < max_len:
+                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long)
+                labels = torch.cat([labels, padding], dim = 1).to(self.device)
+        else:
             return texts["input_ids"], texts["attention_mask"], None
         
         return texts["input_ids"], texts["attention_mask"], labels
@@ -59,13 +72,14 @@ class NERStudentModel(CurriculumTagger):
     def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         input_ids = input_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
+        labels = labels.to(self.device)
         
         out = self.transformer(input_ids, attention_mask).last_hidden_state
         out = self.linear(out)
         preds = torch.argmax(out, dim = -1)
-        probs = torch.max(out, dim = -1)
-        if labels:
-            loss = F.cross_entropy(out.view(-1, out.size(-1)), labels.view(-1), ignore_index = -100)
+        probs = torch.softmax(out, dim = -1)
+        if labels is not None:
+            loss = F.cross_entropy(out.reshape(-1, out.size(-1)), labels.reshape(-1), ignore_index = -100)
         else:
             loss = None
         
@@ -75,7 +89,7 @@ class NERStudentModel(CurriculumTagger):
 class NERCurriculumLearner(CurriculumLearningModel):
     def __init__(self, student_model: CurriculumTagger, teacher_model: DifficultyPredictor, train_dataloader_args: Dict[str, Any], learning_rate: float,
                  logging : bool, to_string_labels : Callable[[int], str]) -> None:
-        super(CurriculumLearningModel, self).__init__(student_model, teacher_model, train_dataloader_args, learning_rate, logging)
+        super().__init__(student_model, teacher_model, train_dataloader_args, learning_rate, logging)
         self.to_string_labels = to_string_labels
 
     def compute_per_sample_loss(self, input_ids, attention_mask, labels) -> torch.Tensor:
@@ -86,7 +100,7 @@ class NERCurriculumLearner(CurriculumLearningModel):
             for i in range(batch_size):
                 sample_logits = logits[i].unsqueeze(0)  # [1, T, num_labels]
                 sample_labels = labels[i].unsqueeze(0)  # [1, T]
-                loss = F.cross_entropy(sample_logits.view(-1, sample_logits.size(-1)), sample_labels.view(-1), ignore_index = -100, reduction = 'mean')
+                loss = F.cross_entropy(sample_logits.reshape(-1, sample_logits.size(-1)), sample_labels.reshape(-1), ignore_index = -100, reduction = 'mean')
                 per_sample_loss.append(loss.item())
             
             target_losses = torch.tensor(per_sample_loss, device = self.device)
@@ -96,13 +110,12 @@ class NERCurriculumLearner(CurriculumLearningModel):
     def compute_total_loss(self, losses) -> torch.Tensor:
         return losses
     
-    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+    def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
         if isinstance(y_pred, torch.Tensor):
             y_pred = y_pred.detach().cpu().tolist()
         if isinstance(y_true, torch.Tensor):
             y_true = y_true.detach().cpu().tolist()
 
-        # Filter out -100 (ignore tokens)
         true_labels = []
         pred_labels = []
         
@@ -119,6 +132,13 @@ class NERCurriculumLearner(CurriculumLearningModel):
                 pred_labels.append(filtered_pred)
 
         if not true_labels:
+            return [], [] 
+        
+        return pred_labels, true_labels
+    
+    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+        pred_labels, true_labels = self.filter_out_padding_tokens(y_pred, y_true)
+        if true_labels == []:
             return
 
         acc = accuracy_score(true_labels, pred_labels)
@@ -126,7 +146,7 @@ class NERCurriculumLearner(CurriculumLearningModel):
         recall = recall_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
         f1 = f1_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
 
-        batch_size = len(true_labels)
+        batch_size = self.batch_size # len(true_labels)
         with warnings.catch_warnings(action = "ignore"):
             self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
             self.log(f"{step_type} precision", precision, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
@@ -136,33 +156,35 @@ class NERCurriculumLearner(CurriculumLearningModel):
 
 class FakeNewsTeacherModel(DifficultyPredictor):
     def __init__(self, model_name: str) -> None:
-        super(DifficultyPredictor, self).__init__(model_name)
+        super().__init__(model_name)
 
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        try:
+        if "label" in batch:
             labels = batch["label"]
-            labels = labels.to(self.device)
-        except KeyError:
-            return texts["input_ids"], texts["attention_mask"]
+            if len(labels) > 0:
+                labels = torch.tensor(labels, dtype = torch.long, device = self.device)
+        else:
+            return texts["input_ids"], texts["attention_mask"], None
         
         return texts["input_ids"], texts["attention_mask"], labels
 
 
 class FakeNewsStudentModel(CurriculumTagger):
     def __init__(self, model_name: str, train_dataset: Dataset, num_labels: int, batch_size: int) -> None:
-        super(CurriculumTagger, self).__init__(model_name, train_dataset, num_labels, batch_size)
+        super().__init__(model_name, train_dataset, num_labels, batch_size)
 
     def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         texts = batch["text"]
-        texts = self.tokenizer(texts, return_tensors = "pt", padding = "longest", truncation = True, return_offsets_mapping = True, is_split_into_words = True)
+        texts = self.tokenizer(texts, return_tensors = "pt", padding = "max_length", truncation = True, max_length = 512, return_offsets_mapping = True)
         texts = texts.to(self.device)
-        try:
+        if "label" in batch:
             labels = batch["label"]
-            labels = labels.to(self.device)
-        except KeyError:
+            if len(labels) > 0:
+                labels = torch.tensor(labels, dtype = torch.long, device = self.device)
+        else:
             return texts["input_ids"], texts["attention_mask"], None
         
         return texts["input_ids"], texts["attention_mask"], labels
@@ -172,13 +194,15 @@ class FakeNewsStudentModel(CurriculumTagger):
     def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         input_ids = input_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
+        labels = labels.to(self.device)
         
         out = self.transformer(input_ids, attention_mask).last_hidden_state
-        out = self.linear(out)
+        cls_embeddings = out[:, 0, :]
+        out = self.linear(cls_embeddings)
         preds = torch.argmax(out, dim = -1)
-        probs = torch.max(out, dim = -1)
-        if labels:
-            loss = F.cross_entropy(out.view(-1, out.size(-1)), labels.view(-1), ignore_index = -100)
+        probs = torch.softmax(out, dim = -1)
+        if labels is not None:
+            loss = F.cross_entropy(out, labels, ignore_index = -100)
         else:
             loss = None
         
@@ -188,17 +212,29 @@ class FakeNewsStudentModel(CurriculumTagger):
 class FakeNewsCurriculumLearner(CurriculumLearningModel):
     def __init__(self, student_model: CurriculumTagger, teacher_model: DifficultyPredictor, train_dataloader_args: Dict[str, Any], learning_rate: float,
                  logging : bool) -> None:
-        super(CurriculumLearningModel, self).__init__(student_model, teacher_model, train_dataloader_args, learning_rate, logging)
+        super().__init__(student_model, teacher_model, train_dataloader_args, learning_rate, logging)
+
+        metrics = MetricCollection({
+            "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "precision": Precision(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "recall": Recall(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "f1_score": F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro")
+        })
+        self.train_metrics = metrics.clone(prefix = "Training ")
+        self.validation_metrics = metrics.clone(prefix = "Validation ")
+        self.test_metrics = metrics.clone(prefix = "Test ")
 
     def compute_per_sample_loss(self, input_ids, attention_mask, labels) -> torch.Tensor:
         batch_size = input_ids.size(0)
         with torch.no_grad():
-            logits = self.student_model.linear(self.student_model.transformer(input_ids, attention_mask = attention_mask).last_hidden_state)
+            transformer_output = self.student_model.transformer(input_ids, attention_mask = attention_mask).last_hidden_state
+            cls_embeddings = transformer_output[:, 0, :]
+            logits = self.student_model.linear(cls_embeddings)
             per_sample_loss = []
             for i in range(batch_size):
-                sample_logits = logits[i].unsqueeze(0)  # [1, T, num_labels]
-                sample_labels = labels[i].unsqueeze(0)  # [1, T]
-                loss = F.cross_entropy(sample_logits.view(-1, sample_logits.size(-1)), sample_labels.view(-1), ignore_index = -100, reduction = 'none')
+                sample_logits = logits[i]
+                sample_labels = labels[i]
+                loss = F.cross_entropy(sample_logits, sample_labels, ignore_index = -100, reduction = 'none')
                 per_sample_loss.append(loss.item())
             
             target_losses = torch.tensor(per_sample_loss, device = self.device)
@@ -209,24 +245,21 @@ class FakeNewsCurriculumLearner(CurriculumLearningModel):
         return losses
     
     def compute_and_log_metrics(self, y_pred: torch.Tensor, y_true: torch.Tensor, step_type: str) -> None:
-        y_pred = y_pred.detach()
-        y_true = y_true.detach()
-
-        accuracy = Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        precision = Precision(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        recall = Recall(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        f1_score = F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-
-        acc = accuracy(y_pred, y_true)
-        prec = precision(y_pred, y_true)
-        rec = recall(y_pred, y_true)
-        f1 = f1_score(y_pred, y_true)
+        if len(y_true) == 0:
+            return
+        
+        y_pred = y_pred.detach().float()
+        y_true = y_true.detach().long()
+        mapping = {
+            "Training": self.train_metrics,
+            "Validation": self.validation_metrics,
+            "Test": self.test_metrics
+        }
+        metric_collection = mapping.get(step_type)
+        output = metric_collection(y_pred, y_true)
 
         with warnings.catch_warnings(action = "ignore"):
-            self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} precision", prec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} recall", rec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
+            self.log_dict(output, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
 
 
 def get_args() -> argparse.Namespace:
@@ -300,7 +333,7 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             task_name = "fake news"
     
     aim_logger = AimLogger(f"aim_logs_curriculum_{task}", f"Curriculum learning for {task_name}", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.max_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)

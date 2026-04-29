@@ -6,7 +6,7 @@ import pandas as pd
 
 from torch.utils.data import Dataset
 
-from marcell import read_legalnero_dataset
+from .marcell import read_legalnero_dataset
 
 class JuRODataset(Dataset):
     def __init__(self, data : pd.DataFrame) -> None:
@@ -21,18 +21,19 @@ class JuRODataset(Dataset):
         return {"text": row["text"]}
     
     @staticmethod
-    def collator(batch : Dict[str, pd.Series]) -> Dict[str, List[str]]:
-        return {"text": batch["text"].tolist()}
+    def collator(batch : List[Dict[str, str | int]]) -> Dict[str, List[str] | List[int]]:
+        return {"text": [item["text"] for item in batch]}
 
 
 def get_all_filenames(type : str) -> List[str]:
+    # determine the relative path (w.r.t to the project root, i.e. the `algorithms` folder)
     match type:
         case "train":
-            file_path = "../datasets/JuRO/train_set"
+            file_path = "datasets/JuRO/train_set"
         case "validation":
-            file_path = "../datasets/JuRO/validation_set"
+            file_path = "datasets/JuRO/validation_set"
         case "test":
-            file_path = "../datasets/JuRO/test_set"
+            file_path = "datasets/JuRO/test_set"
     
     files = []
     for dirpath, dirnames, filenames in os.walk(file_path):
@@ -48,7 +49,7 @@ def df_from_row(row : Tuple[str, str, str, str]) -> pd.DataFrame:
     index_b = row[2].find("\nB.", index_a + 4) # see the comment below
     index_c = row[2].find("\nC.", index_b + 4)
     
-    # When delimiting the answers, we need to strip the two whitespaces after "A.", "B." and "C."
+    # when delimiting the answers, we need to strip the two whitespaces after "A.", "B." and "C."
     answer_a = row[2][(index_a + 3) : index_b] if index_b >= 0 else ""
     answer_b = row[2][(index_b + 3) : index_c] if index_b >= 0 else ""
     answer_c = row[2][(index_c + 3) :] if index_c >= 0 else ""
@@ -63,7 +64,7 @@ def df_from_row(row : Tuple[str, str, str, str]) -> pd.DataFrame:
     if first_correct == "":
         return pd.DataFrame({})
     
-    # Remove double spaces between sentence parts and replace punctuation with full stop (or add full stop, if necessary)
+    # remove double spaces between sentence parts and replace punctuation with full stop (or add full stop, if necessary)
     sentence = (first_part + " " + first_correct).strip("\n")
     sentence = sentence + "." if sentence[-1].isalpha() else (sentence[:-1] + "." if sentence[-1] != "." else sentence)
     sentence = sentence[:-1] if sentence.endswith("..") else sentence

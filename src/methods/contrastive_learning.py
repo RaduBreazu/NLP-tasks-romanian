@@ -1,4 +1,4 @@
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 from abc import ABC, abstractmethod
 
@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import pytorch_lightning as pl
+from torch.nn.utils.rnn import pad_sequence
 
 from transformers import AutoModel, AutoTokenizer
 
@@ -58,7 +59,7 @@ class ContrastiveLoss(nn.Module):
 
 class ContrastiveNetwork(ABC, pl.LightningModule):
     def __init__(self, model_name: str, num_labels: int, batch_size: int, learning_rate: float, contrastive_weight: float, temperature: float, logging : bool) -> None:
-        super(pl.LightningModule, self).__init__()
+        super().__init__()
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.contrastive_weight = contrastive_weight
@@ -73,31 +74,24 @@ class ContrastiveNetwork(ABC, pl.LightningModule):
             nn.Linear(self.transformer.config.hidden_size, self.num_labels)
         )
 
-        # Projection head for contrastive learning
-        hidden_size = self.transformer.config.hidden_size
-        self.projection_head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, 128)
-        )
-
         self.cross_entropy_loss = nn.CrossEntropyLoss(ignore_index = -100)
         self.contrastive_loss = ContrastiveLoss(temperature)
 
         self.logging = logging
 
     @abstractmethod
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor. torch.Tensor, torch.Tensor]:
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pass
     
     # This method must also return the normalized logits (i.e. the classification probabilities)
     @abstractmethod
-    def forward(self, input_ids, attention_mask, labels, compute_contrastive = True):
+    def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True):
         pass
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         input_ids, attention_mask, labels = self.tokenize_input(batch)
-        preds, probs, (ce_loss, cont_loss) = self(input_ids, attention_mask, labels, compute_contrastive = True)
+        new_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
+        preds, probs, (ce_loss, cont_loss) = self(new_batch, compute_contrastive = True)
         loss = ce_loss + self.contrastive_weight * cont_loss
 
         if self.logging:
@@ -109,17 +103,24 @@ class ContrastiveNetwork(ABC, pl.LightningModule):
             self.compute_and_log_metrics(preds, labels, "Training")
 
         return loss
-
-    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        input_ids, attention_mask, labels = self.tokenize_input(labels)
-        preds, probs, (ce_loss, _) = self(input_ids, attention_mask, labels, compute_contrastive = False)
+    
+    def perform_eval_step(self, batch: Dict[str, torch.Tensor], step_type: str) -> Optional[torch.Tensor]:
+        input_ids, attention_mask, labels = self.tokenize_input(batch)
+        new_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
+        preds, probs, (ce_loss, _) = self(new_batch, compute_contrastive = False)
         loss = ce_loss
 
         if self.logging:
-            self.log("Test loss", loss, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
-            self.compute_and_log_metrics(preds, labels, "Test")
+            self.log(f"{step_type} loss", loss, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
+            self.compute_and_log_metrics(preds, labels, step_type)
 
         return loss
+
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Optional[torch.Tensor]:
+        return self.perform_eval_step(batch, "Validation")
+    
+    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Optional[torch.Tensor]:
+        return self.perform_eval_step(batch, "Test")
     
     @abstractmethod
     def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:

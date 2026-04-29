@@ -27,17 +27,14 @@ class CurriculumSampler(Sampler[int]):
         return len(self.dataset)
 
     def __iter__(self) -> Iterator[int]:
-        sorted_indices = sorted(
-            range(len(self.difficulty_scores)),
-            key = lambda i: self.difficulty_scores[i]
-        )
+        sorted_indices = sorted(range(len(self.difficulty_scores)), key = lambda i: self.difficulty_scores[i])
         return iter(sorted_indices)
 
 
 # The teacher model
-class DifficultyPredictor(ABC, pl.LightningModule):
+class DifficultyPredictor(pl.LightningModule):
     def __init__(self, model_name : str):
-        super(pl.LightningModule, self).__init__()
+        super().__init__()
         self.model = AutoModel.from_pretrained(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.linear = nn.Sequential(
@@ -47,36 +44,34 @@ class DifficultyPredictor(ABC, pl.LightningModule):
         self.criterion = F.mse_loss
 
     @abstractmethod
-    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor]:
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pass
     
-    def forward(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor]):
-        x = self.tokenize_input(batch)
-        match x:
-            case (input_ids, attention_mask, target_losses):
-                input_ids = input_ids.to(self.device)
-                attention_mask = attention_mask.to(self.device)
-                target_losses = target_losses.to(self.device).float()
+    def forward(self, batch: Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]):
+        input_ids, attention_mask, target_losses = batch
+        if target_losses is not None:
+            input_ids = input_ids.to(self.device)
+            attention_mask = attention_mask.to(self.device)
+            target_losses = target_losses.to(self.device).float()
 
-                out = self.model(input_ids, attention_mask = attention_mask).last_hidden_state
-                out = self.linear(out[:, 0, :])
-                out = out.squeeze(-1)
-                loss = self.criterion(out, target_losses.view_as(out))
-                return loss, out
+            out = self.model(input_ids, attention_mask = attention_mask).last_hidden_state
+            out = self.linear(out[:, 0, :])
+            out = out.squeeze(-1)
+            loss = self.criterion(out, target_losses.view_as(out))
+            return loss, out
+        else:
+            input_ids = input_ids.to(self.device)
+            attention_mask = attention_mask.to(self.device)
 
-            case (input_ids, attention_mask):
-                input_ids = input_ids.to(self.device)
-                attention_mask = attention_mask.to(self.device)
-
-                out = self.model(input_ids, attention_mask = attention_mask).last_hidden_state
-                out = self.linear(out[:, 0, :]).squeeze(-1)
-                return out
+            out = self.model(input_ids, attention_mask = attention_mask).last_hidden_state
+            out = self.linear(out[:, 0, :]).squeeze(-1)
+            return out
             
 
 # The student model
 class CurriculumTagger(ABC, pl.LightningModule):
     def __init__(self, model_name : str, train_dataset: Dataset, num_labels: int, batch_size: int) -> None:
-        super(pl.LightningModule, self).__init__()
+        super().__init__()
         self.train_dataset = train_dataset
         self.batch_size = batch_size
         self.num_labels = num_labels
@@ -103,9 +98,12 @@ class CurriculumTagger(ABC, pl.LightningModule):
 class CurriculumLearningModel(ABC, pl.LightningModule):
     def __init__(self, student_model: pl.LightningModule, teacher_model: DifficultyPredictor, train_dataloader_args: Dict[str, Any], learning_rate: float,
                  logging : bool) -> None:
-        super(pl.LightningModule, self).__init__()
+        super().__init__()
         self.student_model = student_model
         self.teacher_model = teacher_model
+
+        self.batch_size = self.student_model.batch_size
+        self.num_labels = self.student_model.num_labels
 
         self.automatic_optimization = False
         self.train_dataloader_args = train_dataloader_args
@@ -120,7 +118,7 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
         with torch.no_grad():
             default_loader = DataLoader(
                 self.student_model.train_dataset,
-                batch_size = self.student_model.batch_size,
+                batch_size = self.batch_size,
                 collate_fn = type(self.student_model.train_dataset).collator,
             )
             for batch in default_loader:
@@ -134,7 +132,10 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
         return DataLoader(self.student_model.train_dataset, sampler = sampler, **self.train_dataloader_args)
 
     def forward(self, batch : Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        input_ids, attention_mask, labels = self.student_model.tokenize_input(batch)
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
+        
         return self.student_model(input_ids, attention_mask, labels)
     
     # Auxiliary function that computes and logs the performance metrics
@@ -193,12 +194,10 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
 
         return student_loss
 
-    
     def on_train_epoch_end(self):
         for scheduler in self.lr_schedulers():
             scheduler.step()
 
-    
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         input_ids, attention_mask, labels = self.student_model.tokenize_input(batch)
         batch_size = input_ids.size(0)

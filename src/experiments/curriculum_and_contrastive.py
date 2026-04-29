@@ -7,8 +7,8 @@ from functools import partial
 from typing import Tuple, Dict, Callable, Any
 from torch.utils.data import Dataset, DataLoader
 
-from contrastive_learning import NERContrastive, FakeNewsContrastive
-from curriculum_learning import NERTeacherModel, NERCurriculumLearner, FakeNewsTeacherModel, FakeNewsCurriculumLearner
+from .contrastive_learning import NERContrastive, FakeNewsContrastive
+from .curriculum_learning import NERTeacherModel, NERCurriculumLearner, FakeNewsTeacherModel, FakeNewsCurriculumLearner
 
 from . import MarcellDataset, FakeNewsDataset
 from . import read_legal_ner_dataset, read_fake_news_dataset
@@ -115,7 +115,7 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             raise NotImplementedError("This task is not implemented.")
         
     aim_logger = AimLogger(f"aim_logs_curriculum_contrastive_{task}", f"Curriculum + contrastive learning for {task_name}", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.max_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)

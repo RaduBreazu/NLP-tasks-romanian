@@ -36,8 +36,8 @@ class MarcellDataset(Dataset):
         return {"text": row["text"], "label": row["label"]}
     
     @staticmethod
-    def collator(batch : Dict[str, pd.Series]) -> Dict[str, List[str] | List[int]]:
-        return {"text": batch["text"].tolist(), "label": batch["label"].tolist()}
+    def collator(batch : List[Dict[str, str | int]]) -> Dict[str, List[str] | List[int]]:
+        return {"text": [item["text"] for item in batch], "label": [item["label"] for item in batch]}
     
     @staticmethod
     def to_string_label(label : int) -> str:

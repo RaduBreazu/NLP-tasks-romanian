@@ -6,9 +6,9 @@ from aim.pytorch_lightning import AimLogger
 from copy import deepcopy
 
 from typing import List, Dict, Tuple, Any
-from functools import partial
 
 from torch.utils.data import Dataset, DataLoader
+from torchmetrics import MetricCollection
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score
 
 from seqeval.metrics import precision_score, recall_score, f1_score, accuracy_score
@@ -21,40 +21,42 @@ from . import VotingMechanism, MixtureModel
 
 from . import MyCallback
 
-from plain import NERPlainTagger, FakeNewsPlainDetector
-from curriculum_learning import NERTeacherModel, NERStudentModel, NERCurriculumLearner, FakeNewsTeacherModel, FakeNewsStudentModel, FakeNewsCurriculumLearner
-from contrastive_learning import NERContrastive, FakeNewsContrastive
-from curriculum_and_contrastive import NERCurriculumContrastiveLearner, FakeNewsCurriculumContrastiveLearner
+from .plain import NERPlainTagger, FakeNewsPlainDetector
+from .curriculum_learning import NERTeacherModel, NERStudentModel, NERCurriculumLearner, FakeNewsTeacherModel, FakeNewsStudentModel, FakeNewsCurriculumLearner
+from .contrastive_learning import NERContrastive, FakeNewsContrastive
+from .curriculum_and_contrastive import NERCurriculumContrastiveLearner, FakeNewsCurriculumContrastiveLearner
 
 class LinearVoting(VotingMechanism):
     def __init__(self, num_models : int) -> None:
         super().__init__()
         n = num_models
-        weights = [1.0 / n for _ in range(n)]
-        weights = torch.tensor(weights, dtype = torch.float32, device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        self.weights = weights
+        self.weights = torch.full((n,), 1.0 / n, dtype = torch.float32, device = torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-    def __call__(self, preds : torch.Tensor, probs : torch.Tensor, losses : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        transpose_weights = self.weights.unsqueeze(-1).unsqueeze(-1)
-        new_preds = (preds * transpose_weights).sum(0)
-        new_probs = (probs * transpose_weights).sum(0)
-        new_losses = (losses * transpose_weights).sum(0)
-        return new_preds, new_probs, new_losses
+    def __call__(self, probs : torch.Tensor, losses : torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_dims = probs.dim()
+        view_shape = [-1] + ([1] * (num_dims - 1))
+        w_probs = self.weights.view(*view_shape)
+        new_probs = (probs * w_probs).sum(dim = 0)
+        new_preds = torch.argmax(new_probs, dim = -1)
+        confidence_scores = torch.max(new_probs, dim = -1).values
+        w_losses = self.weights.view(-1, 1) if losses.dim() == 2 else self.weights
+        new_losses = (losses * w_losses).sum(dim = 0)
+        
+        return new_preds, confidence_scores, new_losses
 
 
 class NERMixture(MixtureModel):
-    def __init__(self, models: List[pl.LightningModule], batch_size : int, voting_mechanism : VotingMechanism, logging : bool) -> None:
-        super(MixtureModel, self).__init__(models, batch_size, voting_mechanism, logging)
+    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
+        super().__init__(models, batch_size, num_labels, voting_mechanism, learning_rate, logging)
 
-    def compute_and_log_metrics(self, y_pred, y_true, step_type : str) -> None:
+    def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
         if isinstance(y_pred, torch.Tensor):
             y_pred = y_pred.detach().cpu().tolist()
         if isinstance(y_true, torch.Tensor):
             y_true = y_true.detach().cpu().tolist()
 
-        to_string_labels = self.models[0].to_string_labels
-
-        # Filter out -100 (ignore tokens)
+        to_string_labels = self.models[0].to_string_labels # all models have the same `to_string_labels` implementation, since they are all trained on the same dataset
+        
         true_labels = []
         pred_labels = []
         
@@ -71,6 +73,13 @@ class NERMixture(MixtureModel):
                 pred_labels.append(filtered_pred)
 
         if not true_labels:
+            return [], [] 
+        
+        return pred_labels, true_labels
+    
+    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
+        pred_labels, true_labels = self.filter_out_padding_tokens(y_pred, y_true)
+        if true_labels == []:
             return
 
         acc = accuracy_score(true_labels, pred_labels)
@@ -87,28 +96,45 @@ class NERMixture(MixtureModel):
     
 
 class FakeNewsMixture(MixtureModel):
-    def __init__(self, models: List[pl.LightningModule], batch_size : int, voting_mechanism : VotingMechanism, logging : bool) -> None:
-        super(MixtureModel, self).__init__(models, batch_size, voting_mechanism, logging)
+    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
+        super().__init__(models, batch_size, num_labels, voting_mechanism, learning_rate, logging)
 
-    def compute_and_log_metrics(self, y_pred : torch.Tensor, y_true : torch.Tensor, step_type) -> None:
-        y_pred = y_pred.detach()
-        y_true = y_true.detach()
+        metrics = MetricCollection({
+            "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "precision": Precision(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "recall": Recall(task = "multiclass", num_classes = self.num_labels, average = "macro"),
+            "f1_score": F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro")
+        })
+        self.train_metrics = metrics.clone(prefix = "Training ")
+        self.validation_metrics = metrics.clone(prefix = "Validation ")
+        self.test_metrics = metrics.clone(prefix = "Test ")
 
-        accuracy = Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        precision = Precision(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        recall = Recall(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
-        f1_score = F1Score(task = "multiclass", num_classes = self.num_labels, average = "macro").to(self.device)
+    def compute_and_log_metrics(self, y_pred: torch.Tensor, y_true: torch.Tensor, step_type: str) -> None:
+        if len(y_true) == 0:
+            return
+        
+        match y_pred:
+            case list([*ys]):
+                y_pred = torch.tensor(ys, dtype = torch.float32, device = self.device)
+            case torch.Tensor:
+                y_pred = y_pred.detach().float()
 
-        acc = accuracy(y_pred, y_true)
-        prec = precision(y_pred, y_true)
-        rec = recall(y_pred, y_true)
-        f1 = f1_score(y_pred, y_true)
+        match y_true:
+            case list([*ys]):
+                y_true = torch.tensor(ys, dtype = torch.long, device = self.device)
+            case torch.Tensor:
+                y_true = y_true.detach().long()
+        
+        mapping = {
+            "Training": self.train_metrics,
+            "Validation": self.validation_metrics,
+            "Test": self.test_metrics
+        }
+        metric_collection = mapping.get(step_type)
+        output = metric_collection(y_pred, y_true)
 
         with warnings.catch_warnings(action = "ignore"):
-            self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} precision", prec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} recall", rec, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
-            self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = self.batch_size, on_step = False, on_epoch = True)
+            self.log_dict(output, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
 
 
 def get_datasets(g : torch.Generator, args : argparse.Namespace, task : str) -> Tuple[Dataset, Dataset, Dataset, Dict[str, Any], int]:
@@ -149,19 +175,19 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             case "NER":
                 curriculum_teacher_model = NERTeacherModel(model_name)
                 curriculum_student_model = NERStudentModel(model_name, training_dataset, num_labels, args.batch_size)
-                curriculum_learner = NERCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, args.lr, args.logging,
+                curriculum_learner = NERCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, args.lr, False,
                                                           MarcellDataset.to_string_label)
             case "fake_news":
                 curriculum_teacher_model = FakeNewsTeacherModel(model_name)
                 curriculum_student_model = FakeNewsStudentModel(model_name, training_dataset, num_labels, args.batch_size)
-                curriculum_learner = FakeNewsCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, args.lr, args.logging)
+                curriculum_learner = FakeNewsCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, args.lr, False)
         
         return curriculum_learner
     
     match args.experiment:
         case "ner_simple_models":
             model_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
-            models = [NERPlainTagger(name, MarcellDataset.num_labels, args.batch_size, args.lr, args.logging, MarcellDataset.to_string_label) for name in model_names]
+            models = [NERPlainTagger(name, MarcellDataset.num_labels, args.batch_size, args.lr, False, MarcellDataset.to_string_label) for name in model_names]
             proper_task_name = "NER"
         case "ner_curriculum":
             model_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
@@ -169,7 +195,7 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             proper_task_name = "NER"
         case "ner_contrastive":
             model_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
-            models = [NERContrastive(name, MarcellDataset.num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, args.logging,
+            models = [NERContrastive(name, MarcellDataset.num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, False,
                                      MarcellDataset.to_string_label) for name in model_names]
             proper_task_name = "NER"
         case "ner_curriculum_contrastive":
@@ -177,12 +203,12 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             contrastive_learner = NERContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, args.logging,
                                                  MarcellDataset.to_string_label)
             curriculum_contrastive_learner = NERCurriculumContrastiveLearner(deepcopy(contrastive_learner), deepcopy(curriculum_learner.teacher_model), training_args,
-                                                                             args.lr, args.logging, MarcellDataset.collator)
+                                                                             args.lr, False, MarcellDataset.collator)
             models = [curriculum_learner, contrastive_learner, curriculum_contrastive_learner]
             proper_task_name = "NER"
         case "fake_news_simple_models":
             model_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
-            models = [FakeNewsPlainDetector(name, FakeNewsDataset.num_labels, args.batch_size, args.lr, args.logging) for name in model_names]
+            models = [FakeNewsPlainDetector(name, FakeNewsDataset.num_labels, args.batch_size, args.lr, logging = False) for name in model_names]
             proper_task_name = "fake news detection"
         case "fake_news_curriculum":
             model_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
@@ -190,21 +216,26 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
             proper_task_name = "fake news detection"
         case "fake_news_contrastive":
             model_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
-            models = [FakeNewsContrastive(name, FakeNewsDataset.num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, args.logging)
+            models = [FakeNewsContrastive(name, FakeNewsDataset.num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, logging = False)
                       for name in model_names]
             proper_task_name = "fake_news"
         case "fake_news_curriculum_contrastive":
             curriculum_learner = generate_curriculum_learner("fake_news", args.model_name)
-            contrastive_learner = FakeNewsContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, args.logging)
+            contrastive_learner = FakeNewsContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, logging = False)
             curriculum_contrastive_learner = FakeNewsCurriculumContrastiveLearner(deepcopy(curriculum_learner.student_model), deepcopy(curriculum_learner.teacher_model),
-                                                                                  training_args, args.lr, args.logging)
+                                                                                  training_args, args.lr, logging = False)
             models = [curriculum_learner, contrastive_learner, curriculum_contrastive_learner]
             proper_task_name = "fake news detection"
     
     voting_mechanism = LinearVoting(len(models))
-    model = MixtureModel(models, args.batch_size, voting_mechanism, args.logging)
+    match task:
+        case "NER":
+            model = NERMixture(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
+        case "fake_news":
+            model = FakeNewsMixture(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
+        
     aim_logger = AimLogger(f"aim_logs_mixture_{task}", f"Mixture of experts for {proper_task_name}", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.max_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)
@@ -222,7 +253,7 @@ def get_args() -> argparse.Namespace:
     fake_news_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
     fake_news_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
     fake_news_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
-    fake_news_parser.add_argument("--experiment", type = str, default = "simple_models", help = "Experiment name",
+    fake_news_parser.add_argument("--experiment", type = str, default = "fake_news_simple_models", help = "Experiment name",
                                   choices = ["fake_news_simple_models", "fake_news_curriculum", "fake_news_contrastive", "fake_news_curriculum_contrastive"])
     
     legal_nero_parser = subparsers.add_parser("legal_ner")
@@ -234,7 +265,7 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
     legal_nero_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
-    legal_nero_parser.add_argument("--experiment", type = str, default = "simple_models", help = "Experiment name",
+    legal_nero_parser.add_argument("--experiment", type = str, default = "ner_simple_models", help = "Experiment name",
                                   choices = ["ner_simple_models", "ner_curriculum", "ner_contrastive", "ner_curriculum_contrastive"])
     
     args = parser.parse_args()
