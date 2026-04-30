@@ -15,6 +15,8 @@ class SelfTrainingModel(ABC, pl.LightningModule):
         self.model = model
         self.labelled_data = labelled_data
         self.unlabelled_data = unlabelled_data
+        
+        self.batch_size = self.model.batch_size
         self.logging = logging
 
     def training_dataloader(self) -> DataLoader:
@@ -59,7 +61,7 @@ class SelfTrainingModel(ABC, pl.LightningModule):
             self.unlabelled_data.data = self.unlabelled_data.data.drop(index = high_conf_indices)
             new_loader = DataLoader(self.labelled_data, **loader_args)
         else:
-            new_loader = DataLoader(self.labelled_data, batch_size = 32, shuffle = True, collate_fn = self.labelled_data.collator)
+            new_loader = DataLoader(self.labelled_data, batch_size = self.batch_size, shuffle = True, collate_fn = self.labelled_data.collator)
 
         return new_loader
 
