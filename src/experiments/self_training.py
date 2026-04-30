@@ -30,8 +30,7 @@ from .mixture import LinearVoting, NERMixture, FakeNewsMixture
 
 class NERSelfTraining(SelfTrainingModel):
     def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, logging: bool) -> None:
-        super().__init__(model, labelled_data, unlabelled_data)
-        self.logging = logging
+        super().__init__(model, labelled_data, unlabelled_data, logging)
 
     def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
         if isinstance(y_pred, torch.Tensor):
@@ -46,11 +45,11 @@ class NERSelfTraining(SelfTrainingModel):
             filtered_true = []
             filtered_pred = []
             for p, t in zip(pred_seq, true_seq):
-                if t != -100:  # Skip ignored tokens
+                if t != -100:
                     filtered_true.append(self.to_string_labels(int(t)))
                     filtered_pred.append(self.to_string_labels(int(p)))
             
-            if filtered_true:  # Only add non-empty sequences
+            if filtered_true:
                 true_labels.append(filtered_true)
                 pred_labels.append(filtered_pred)
 
@@ -69,19 +68,17 @@ class NERSelfTraining(SelfTrainingModel):
         recall = recall_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
         f1 = f1_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
 
-        if self.logging:
-            batch_size = self.batch_size # len(true_labels)
-            with warnings.catch_warnings(action = "ignore"):
-                self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
-                self.log(f"{step_type} precision", precision, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
-                self.log(f"{step_type} recall", recall, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
-                self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+        batch_size = self.batch_size
+        with warnings.catch_warnings(action = "ignore"):
+            self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+            self.log(f"{step_type} precision", precision, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+            self.log(f"{step_type} recall", recall, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+            self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
 
 
 class FakeNewsSelfTraining(SelfTrainingModel):
     def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, logging: bool) -> None:
-        super().__init__(model, labelled_data, unlabelled_data)
-        self.logging = logging
+        super().__init__(model, labelled_data, unlabelled_data, logging)
 
         metrics = MetricCollection({
             "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
@@ -107,9 +104,8 @@ class FakeNewsSelfTraining(SelfTrainingModel):
         metric_collection = mapping.get(step_type)
         output = metric_collection(y_pred, y_true)
 
-        if self.logging:
-            with warnings.catch_warnings(action = "ignore"):
-                self.log_dict(output, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
+        with warnings.catch_warnings(action = "ignore"):
+            self.log_dict(output, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -119,13 +115,13 @@ def get_args() -> argparse.Namespace:
                                  "fake_news_mixture_simple_models", "fake_news_mixture_curriculum", "fake_news_mixture_contrastive",
                                  "fake_news_mixture_curriculum_contrastive"]
     fake_news_parser = subparsers.add_parser("fake_news")
-    fake_news_parser.add_argument("--num_epochs", type = int, default = 10, help = "Number of epochs")
+    fake_news_parser.add_argument("--num_epochs", type = int, default = 20, help = "Number of epochs")
     fake_news_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
-    fake_news_parser.add_argument("--lr", type = float, default = 2e-5, help = "Learning rate")
-    fake_news_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
+    fake_news_parser.add_argument("--lr", type = float, default = 1e-4, help = "Learning rate")
+    fake_news_parser.add_argument("--batch_size", type = int, default = 16, help = "Batch size")
     fake_news_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-cased-v1", help = "Name of pretrained model to be used")
     fake_news_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    fake_news_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
+    fake_news_parser.add_argument("--temperature", type = float, default = 0.1, help = "Temperature")
     fake_news_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     fake_news_parser.add_argument("--experiment", type = str, default = "fake_news_simple_model", help = "Experiment name",
                                   choices = fake_news_experiment_list)
@@ -139,7 +135,7 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
     legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    legal_nero_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
+    legal_nero_parser.add_argument("--temperature", type = float, default = 0.15, help = "Temperature")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     legal_nero_parser.add_argument("--experiment", type = str, default = "ner_simple_model", help = "Experiment name",
                                   choices = ner_experiment_list)
@@ -217,7 +213,7 @@ def perform_legal_nero_experiments(g : torch.Generator, args : argparse.Namespac
             experiment_name = "mixture of curriculum and contrastive learning experts"
 
     model = NERSelfTraining(supervised_model, training_data, unlabelled_dataset, args.logging)
-    aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training of {experiment_name} for fake news", "Train_", "Validation_", "Test_")
+    aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training of {experiment_name} for NER", "Train_", "Validation_", "Test_")
     trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)

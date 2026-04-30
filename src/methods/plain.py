@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import pytorch_lightning as pl
-from torch.nn.utils.rnn import pad_sequence
 
 from transformers import AutoModel, AutoTokenizer
 
@@ -35,7 +34,7 @@ class PlainNetwork(ABC, pl.LightningModule):
     def forward(self, batch : Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pass
 
-    def perform_step(self, batch : Dict[str, torch.Tensor], step_type : str) -> Optional[torch.Tensor]:
+    def perform_step(self, batch : Dict[str, torch.Tensor], step_type : str) -> Dict[str, torch.Tensor]:
         input_ids, attention_mask, labels = self.tokenize_input(batch)
         new_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
         preds, probs, loss = self(new_batch)
@@ -44,7 +43,7 @@ class PlainNetwork(ABC, pl.LightningModule):
             self.log(f"{step_type} loss", loss, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
             self.compute_and_log_metrics(preds, labels, "Training" if step_type == "Train" else step_type)
         
-        return loss
+        return {"pred": preds, "true": labels, "loss": loss}
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         return self.perform_step(batch, "Training")

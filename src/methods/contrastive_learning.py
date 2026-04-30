@@ -7,7 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import pytorch_lightning as pl
-from torch.nn.utils.rnn import pad_sequence
 
 from transformers import AutoModel, AutoTokenizer
 
@@ -18,31 +17,27 @@ class ContrastiveLoss(nn.Module):
 
     def forward(self, embeddings: torch.Tensor, labels: torch.Tensor, classifier_weights : torch.Tensor) -> torch.Tensor:
         """
-        Full Dual Contrastive Loss
+        Dual Contrastive Loss
         Args:
             embeddings: [N, D] normalized embeddings for the batch
             labels: [N] class labels for the batch
             classifier_weights: [C, D] weights of the linear layer
         """
-        # 1. Normalize
         features = F.normalize(embeddings, p = 2, dim = 1)
         weights = F.normalize(classifier_weights, p = 2, dim = 1)
         
-        # 2. Compute similarity matrix [N, C]
         sim_matrix = torch.matmul(features, weights.T) / self.temperature
         
         # --- L_z: Sample-to-Label Loss ---
-        # For each sample (row), we want to identify the correct class (column)
-        # This is equivalent to CrossEntropy across the rows
+        # We compute the cross-entropy loss in order to determine the correct label for each example (row in the similarity matrix)
         loss_z = F.cross_entropy(sim_matrix, labels)
         
         # --- L_theta: Label-to-Sample Loss ---
         # For each class (column), we want to identify which samples (rows) belong to it
-        # We transpose the matrix to get [C, N] and use a mask for correct samples
+        # We observe that (features @ weights.T).T = weights @ features.T, which is the similarity matrix between the weights and the features
         sim_matrix_theta = sim_matrix.T # [C, N]
         
-        # Create a binary mask where mask[j, i] = 1 if sample i has label j
-        # Shape: [C, N]
+        # Binary mask where mask[j, i] = 1 if sample i has label j --> mask shape: [C, N]
         adj_mask = (labels.unsqueeze(0) == torch.arange(weights.size(0), device = labels.device).unsqueeze(1)).float()
         
         # We use a log-sum-exp approach for the denominator across samples
@@ -88,7 +83,7 @@ class ContrastiveNetwork(ABC, pl.LightningModule):
     def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True):
         pass
     
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         input_ids, attention_mask, labels = self.tokenize_input(batch)
         new_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
         preds, probs, (ce_loss, cont_loss) = self(new_batch, compute_contrastive = True)
@@ -102,9 +97,9 @@ class ContrastiveNetwork(ABC, pl.LightningModule):
 
             self.compute_and_log_metrics(preds, labels, "Training")
 
-        return loss
+        return {"pred": preds, "true": labels, "loss": loss}
     
-    def perform_eval_step(self, batch: Dict[str, torch.Tensor], step_type: str) -> Optional[torch.Tensor]:
+    def perform_eval_step(self, batch: Dict[str, torch.Tensor], step_type: str) -> Dict[str, torch.Tensor]:
         input_ids, attention_mask, labels = self.tokenize_input(batch)
         new_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
         preds, probs, (ce_loss, _) = self(new_batch, compute_contrastive = False)
@@ -114,7 +109,7 @@ class ContrastiveNetwork(ABC, pl.LightningModule):
             self.log(f"{step_type} loss", loss, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
             self.compute_and_log_metrics(preds, labels, step_type)
 
-        return loss
+        return {"pred": preds, "true": labels, "loss": loss}
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Optional[torch.Tensor]:
         return self.perform_eval_step(batch, "Validation")

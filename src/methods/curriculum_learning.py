@@ -10,7 +10,6 @@ import torch.optim as optim
 import pytorch_lightning as pl
 
 from torch.utils.data import Dataset, DataLoader, Sampler
-from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoTokenizer, AutoModel
 
 # The curriculum sampler
@@ -87,8 +86,7 @@ class CurriculumTagger(ABC, pl.LightningModule):
     def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pass
 
-    # This method must also return the normalized logits (i.e. the classification probabilities)
-    # Be aware that this method receives an already tokenized input
+    # Attention: this method receives an already tokenized input
     @abstractmethod
     def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pass
@@ -138,7 +136,6 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
         
         return self.student_model(input_ids, attention_mask, labels)
     
-    # Auxiliary function that computes and logs the performance metrics
     @abstractmethod
     def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
         pass
@@ -153,7 +150,7 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
     def compute_per_sample_loss(self, input_ids, attention_mask, labels) -> torch.Tensor:
         pass
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         student_opt, teacher_opt = self.optimizers()
 
         input_ids, attention_mask, labels = self.student_model.tokenize_input(batch)
@@ -192,28 +189,34 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
             # Metrics
             self.compute_and_log_metrics(student_preds, labels, "Training")
 
-        return student_loss
+        return {"pred": student_preds, "true": labels, "loss": student_loss}
 
     def on_train_epoch_end(self):
         for scheduler in self.lr_schedulers():
             scheduler.step()
 
-    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def perform_eval_step(self, batch: Dict[str, torch.Tensor], step_type : str) -> Dict[str, torch.Tensor]:
         input_ids, attention_mask, labels = self.student_model.tokenize_input(batch)
         batch_size = input_ids.size(0)
 
-        student_loss, student_output = self.student_model(input_ids, attention_mask, labels)
+        student_preds, student_probs, student_losses = self.student_model(input_ids, attention_mask, labels)
+        student_loss = self.compute_total_loss(student_losses)
 
         if self.logging:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                self.log("Test loss", student_loss.detach().item(), prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
+                self.log(f"{step_type} loss", student_loss.detach().item(), prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
 
-            self.compute_and_log_metrics(student_output, labels, "Test")
+            self.compute_and_log_metrics(student_preds, labels, step_type)
         
-        return student_loss
+        return {"pred": student_preds, "true": labels, "loss": student_loss}
 
-    # Optimizers + schedulers
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+        return self.perform_eval_step(batch, "Validation")
+    
+    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+        return self.perform_eval_step(batch, "Test")
+
     def configure_optimizers(self):
         student_opt = optim.AdamW(self.student_model.parameters(), lr = self.learning_rate, weight_decay = 0.01)
         teacher_opt = optim.AdamW(self.teacher_model.parameters(), lr = self.learning_rate, weight_decay = 0.01)

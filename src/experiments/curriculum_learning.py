@@ -37,7 +37,7 @@ class NERTeacherModel(DifficultyPredictor):
             if labels.shape[1] > max_len:
                 labels = labels[:, :max_len]
             elif labels.shape[1] < max_len:
-                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long)
+                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long, device = self.device)
                 labels = torch.cat([labels, padding], dim = 1).to(self.device)
         else:
             return texts["input_ids"], texts["attention_mask"], None
@@ -60,7 +60,7 @@ class NERStudentModel(CurriculumTagger):
             if labels.shape[1] > max_len:
                 labels = labels[:, :max_len]
             elif labels.shape[1] < max_len:
-                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long)
+                padding = torch.full((labels.shape[0], max_len - labels.shape[1]), -100, dtype = torch.long, device = self.device)
                 labels = torch.cat([labels, padding], dim = 1).to(self.device)
         else:
             return texts["input_ids"], texts["attention_mask"], None
@@ -68,7 +68,6 @@ class NERStudentModel(CurriculumTagger):
         return texts["input_ids"], texts["attention_mask"], labels
 
     # This method must also return the normalized logits (i.e. the classification probabilities)
-    # Be aware that this method receives an already tokenized input
     def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         input_ids = input_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
@@ -123,11 +122,11 @@ class NERCurriculumLearner(CurriculumLearningModel):
             filtered_true = []
             filtered_pred = []
             for p, t in zip(pred_seq, true_seq):
-                if t != -100:  # Skip ignored tokens
+                if t != -100:
                     filtered_true.append(self.to_string_labels(int(t)))
                     filtered_pred.append(self.to_string_labels(int(p)))
             
-            if filtered_true:  # Only add non-empty sequences
+            if filtered_true:
                 true_labels.append(filtered_true)
                 pred_labels.append(filtered_pred)
 
@@ -146,7 +145,7 @@ class NERCurriculumLearner(CurriculumLearningModel):
         recall = recall_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
         f1 = f1_score(true_labels, pred_labels, zero_division = 0, mode = "strict", scheme = IOB2, average = "macro")
 
-        batch_size = self.batch_size # len(true_labels)
+        batch_size = self.batch_size
         with warnings.catch_warnings(action = "ignore"):
             self.log(f"{step_type} accuracy", acc, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
             self.log(f"{step_type} precision", precision, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
@@ -189,8 +188,6 @@ class FakeNewsStudentModel(CurriculumTagger):
         
         return texts["input_ids"], texts["attention_mask"], labels
 
-    # This method must also return the normalized logits (i.e. the classification probabilities)
-    # Be aware that this method receives an already tokenized input
     def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         input_ids = input_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
@@ -267,10 +264,10 @@ def get_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(help = "Task choice. Available options: fake_news, legal_ner")
     
     fake_news_parser = subparsers.add_parser("fake_news")
-    fake_news_parser.add_argument("--num_epochs", type = int, default = 10, help = "Number of epochs")
+    fake_news_parser.add_argument("--num_epochs", type = int, default = 20, help = "Number of epochs")
     fake_news_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
-    fake_news_parser.add_argument("--lr", type = float, default = 2e-5, help = "Learning rate")
-    fake_news_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
+    fake_news_parser.add_argument("--lr", type = float, default = 1e-4, help = "Learning rate")
+    fake_news_parser.add_argument("--batch_size", type = int, default = 16, help = "Batch size")
     fake_news_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-cased-v1", help = "Name of pretrained model to be used")
     fake_news_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     fake_news_parser.set_defaults(func = perform_fake_news_experiments)

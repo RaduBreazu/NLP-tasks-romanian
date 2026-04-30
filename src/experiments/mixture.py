@@ -109,7 +109,7 @@ class FakeNewsMixture(MixtureModel):
         self.validation_metrics = metrics.clone(prefix = "Validation ")
         self.test_metrics = metrics.clone(prefix = "Test ")
 
-    def compute_and_log_metrics(self, y_pred: torch.Tensor, y_true: torch.Tensor, step_type: str) -> None:
+    def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
         if len(y_true) == 0:
             return
         
@@ -245,13 +245,13 @@ def get_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(help = "Task choice. Available options: fake_news, legal_ner")
     
     fake_news_parser = subparsers.add_parser("fake_news")
-    fake_news_parser.add_argument("--num_epochs", type = int, default = 10, help = "Number of epochs")
+    fake_news_parser.add_argument("--num_epochs", type = int, default = 20, help = "Number of epochs")
     fake_news_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
-    fake_news_parser.add_argument("--lr", type = float, default = 2e-5, help = "Learning rate")
-    fake_news_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
+    fake_news_parser.add_argument("--lr", type = float, default = 1e-4, help = "Learning rate")
+    fake_news_parser.add_argument("--batch_size", type = int, default = 16, help = "Batch size")
     fake_news_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-cased-v1", help = "Name of pretrained model to be used")
     fake_news_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    fake_news_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
+    fake_news_parser.add_argument("--temperature", type = float, default = 0.1, help = "Temperature")
     fake_news_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     fake_news_parser.add_argument("--experiment", type = str, default = "fake_news_simple_models", help = "Experiment name",
                                   choices = ["fake_news_simple_models", "fake_news_curriculum", "fake_news_contrastive", "fake_news_curriculum_contrastive"])
@@ -263,7 +263,7 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
     legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    legal_nero_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
+    legal_nero_parser.add_argument("--temperature", type = float, default = 0.15, help = "Temperature")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     legal_nero_parser.add_argument("--experiment", type = str, default = "ner_simple_models", help = "Experiment name",
                                   choices = ["ner_simple_models", "ner_curriculum", "ner_contrastive", "ner_curriculum_contrastive"])

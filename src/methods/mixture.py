@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Dict
 from abc import ABC, abstractmethod
 
 import torch
@@ -25,8 +25,7 @@ class MixtureModel(ABC, pl.LightningModule):
         self.learning_rate = learning_rate
         self.logging = logging
 
-    # Since it is called by the `forward` method of the concrete model, this method must return a tuple of the form `(preds, probs, loss)`
-    # Be aware of the fact that the loss computed here must be differentiable!
+    # Attention: the loss computed here must be differentiable!
     def forward(self, x):
         all_preds = []
         all_probs = []
@@ -43,12 +42,11 @@ class MixtureModel(ABC, pl.LightningModule):
         all_losses = torch.stack(all_losses)
         return self.voting_mechanism(all_probs, all_losses)
     
-    # Auxiliary function that computes and logs the performance metrics
     @abstractmethod
     def compute_and_log_metrics(self, y_pred, y_true, step_type : str) -> None:
         pass
 
-    def training_step(self, batch, batch_idx : int) -> None:
+    def training_step(self, batch, batch_idx : int) -> Dict[str, torch.Tensor]:
         optimizers = self.optimizers()
         
         all_preds = []
@@ -78,14 +76,18 @@ class MixtureModel(ABC, pl.LightningModule):
         if self.logging:
             self.compute_and_log_metrics(preds, labels, "Training")
 
-    def evaluation_step(self, batch, step_type : str) -> None:
+        return {"pred": preds, "true": labels, "loss": loss}
+
+    def evaluation_step(self, batch, step_type : str) -> Dict[str, torch.Tensor]:
         for model in self.models:
             model.eval()
         
-        preds, probs, losses = self(batch)
+        preds, probs, loss = self(batch)
         labels = batch["label"]
         if self.logging:
             self.compute_and_log_metrics(preds, labels, step_type)
+
+        return {"pred": preds, "true": labels, "loss": loss}
     
     def validation_step(self, batch, batch_idx : int) -> None:
         return self.evaluation_step(batch, "Validation")
