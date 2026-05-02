@@ -88,8 +88,11 @@ class CurriculumTagger(ABC, pl.LightningModule):
 
     # Attention: this method receives an already tokenized input
     @abstractmethod
-    def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pass
+
+    def compute_total_loss(self, losses) -> torch.Tensor:
+        return losses
 
 
 # LightningModule that runs both the student and the teacher
@@ -100,6 +103,7 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
         self.student_model = student_model
         self.teacher_model = teacher_model
 
+        self.tokenizer = self.student_model.tokenizer
         self.batch_size = self.student_model.batch_size
         self.num_labels = self.student_model.num_labels
 
@@ -128,22 +132,20 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
         sampler = CurriculumSampler(self.student_model.train_dataset, difficulty_scores) # this is where the examples get reordered
 
         return DataLoader(self.student_model.train_dataset, sampler = sampler, **self.train_dataloader_args)
+    
+    def tokenize_input(self, batch) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        return self.student_model.tokenize_input(batch)
 
     def forward(self, batch : Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        input_ids = batch["input_ids"].to(self.device)
-        attention_mask = batch["attention_mask"].to(self.device)
-        labels = batch["label"].to(self.device)
-        
-        return self.student_model(input_ids, attention_mask, labels)
+        return self.student_model(batch)
     
     @abstractmethod
     def compute_and_log_metrics(self, y_pred, y_true, step_type: str) -> None:
         pass
 
-    # This method computes the total loss of the model from the returned loss (useful for when embedding contrastive learning)
-    @abstractmethod
+    # This method reduces the total loss of the model to a single output (useful for when embedding contrastive learning)
     def compute_total_loss(self, losses) -> torch.Tensor:
-        pass
+        return self.student_model.compute_total_loss(losses)
     
     # This method computes per-sample loss for teacher training
     @abstractmethod
@@ -160,7 +162,8 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
         self.student_model.train()
         student_opt.zero_grad()
 
-        student_preds, student_probs, student_losses = self.student_model(input_ids, attention_mask, labels)
+        tokenized_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
+        student_preds, student_probs, student_losses = self.student_model(tokenized_batch)
         student_loss = self.compute_total_loss(student_losses)
 
         self.manual_backward(student_loss)
@@ -199,7 +202,8 @@ class CurriculumLearningModel(ABC, pl.LightningModule):
         input_ids, attention_mask, labels = self.student_model.tokenize_input(batch)
         batch_size = input_ids.size(0)
 
-        student_preds, student_probs, student_losses = self.student_model(input_ids, attention_mask, labels)
+        tokenized_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
+        student_preds, student_probs, student_losses = self.student_model(tokenized_batch)
         student_loss = self.compute_total_loss(student_losses)
 
         if self.logging:

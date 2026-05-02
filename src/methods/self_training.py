@@ -16,7 +16,9 @@ class SelfTrainingModel(ABC, pl.LightningModule):
         self.labelled_data = labelled_data
         self.unlabelled_data = unlabelled_data
         
+        self.automatic_optimization = False
         self.batch_size = self.model.batch_size
+        self.num_labels = self.model.num_labels
         self.logging = logging
 
     def training_dataloader(self) -> DataLoader:
@@ -36,8 +38,8 @@ class SelfTrainingModel(ABC, pl.LightningModule):
                     preds = out[0]
                     probs = out[1]
                     
-                    # if the probability for a certain example is above a certain threshold (say 0.8), label the example with the predicted tag
-                    prob_mask = probs >= 0.8
+                    # if the probability for a certain example is above a certain threshold (say 0.95), label the example with the predicted tag
+                    prob_mask = probs >= 0.95
                     if prob_mask.any():
                         high_conf_indices = torch.where(prob_mask)[0].cpu().numpy()
                         for idx in high_conf_indices:
@@ -74,14 +76,11 @@ class SelfTrainingModel(ABC, pl.LightningModule):
             case "Test":
                 step_method = self.model.test_step
         
-        logging = self.logging
-        self.logging = False   # deactivate logging while training the base model
         output = step_method(batch, batch_idx)
-        self.logging = logging # reactivate logging if desired 
         if self.logging:
             y_pred = output["pred"]
             y_true = output["true"]
-            self.compute_and_log_metrics(y_pred, y_true, "Training")
+            self.compute_and_log_metrics(y_pred, y_true, step_type)
 
         return output
     

@@ -80,8 +80,18 @@ class ContrastiveNetwork(ABC, pl.LightningModule):
     
     # This method must also return the normalized logits (i.e. the classification probabilities)
     @abstractmethod
-    def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True):
+    def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True) -> Tuple[torch.Tensor, torch.Tensor, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
         pass
+
+    # This method is used when embedding a contrastive learning-based model inside another, more complex, one
+    def compute_total_loss(self, losses : Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]) -> Optional[torch.Tensor]:
+        match losses:
+            case (None, None):
+                return None
+            case (ce_loss, None):
+                return ce_loss
+            case (ce_loss, cont_loss):
+                return ce_loss + self.contrastive_weight * cont_loss
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         input_ids, attention_mask, labels = self.tokenize_input(batch)
@@ -105,7 +115,7 @@ class ContrastiveNetwork(ABC, pl.LightningModule):
         preds, probs, (ce_loss, _) = self(new_batch, compute_contrastive = False)
         loss = ce_loss
 
-        if self.logging:
+        if self.logging and loss is not None:
             self.log(f"{step_type} loss", loss, prog_bar = True, on_step = False, on_epoch = True, batch_size = self.batch_size)
             self.compute_and_log_metrics(preds, labels, step_type)
 

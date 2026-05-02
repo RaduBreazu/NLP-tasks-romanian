@@ -68,10 +68,10 @@ class NERStudentModel(CurriculumTagger):
         return texts["input_ids"], texts["attention_mask"], labels
 
     # This method must also return the normalized logits (i.e. the classification probabilities)
-    def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        input_ids = input_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
-        labels = labels.to(self.device)
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
         
         out = self.transformer(input_ids, attention_mask).last_hidden_state
         out = self.linear(out)
@@ -105,9 +105,6 @@ class NERCurriculumLearner(CurriculumLearningModel):
             target_losses = torch.tensor(per_sample_loss, device = self.device)
 
         return target_losses
-    
-    def compute_total_loss(self, losses) -> torch.Tensor:
-        return losses
     
     def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
         if isinstance(y_pred, torch.Tensor):
@@ -188,10 +185,10 @@ class FakeNewsStudentModel(CurriculumTagger):
         
         return texts["input_ids"], texts["attention_mask"], labels
 
-    def forward(self, input_ids, attention_mask, labels) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        input_ids = input_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
-        labels = labels.to(self.device)
+    def forward(self, batch : Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
         
         out = self.transformer(input_ids, attention_mask).last_hidden_state
         cls_embeddings = out[:, 0, :]
@@ -237,9 +234,6 @@ class FakeNewsCurriculumLearner(CurriculumLearningModel):
             target_losses = torch.tensor(per_sample_loss, device = self.device)
 
         return target_losses
-    
-    def compute_total_loss(self, losses) -> torch.Tensor:
-        return losses
     
     def compute_and_log_metrics(self, y_pred: torch.Tensor, y_true: torch.Tensor, step_type: str) -> None:
         if len(y_true) == 0:

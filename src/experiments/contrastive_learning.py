@@ -46,7 +46,7 @@ class NERContrastive(ContrastiveNetwork):
         
         return texts["input_ids"], texts["attention_mask"], labels
 
-    def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+    def forward(self, batch : Dict[str, torch.Tensor], compute_contrastive = True) -> Tuple[torch.Tensor, torch.Tensor, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
         labels = batch["label"].to(self.device)
@@ -71,7 +71,7 @@ class NERContrastive(ContrastiveNetwork):
                 valid_embeddings = flat_embeddings[flat_mask]
                 valid_labels = flat_labels[flat_mask]
                 
-                contrastive_loss = self.contrastive_loss(valid_embeddings, valid_labels, self.linear[1].weight)
+                contrastive_loss = self.contrastive_loss(valid_embeddings, valid_labels, self.linear[1].weight) # classifier_weights = the weights of the linear layer
 
         return preds, probs, (ce_loss, contrastive_loss)
 
@@ -210,7 +210,7 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    legal_nero_parser.add_argument("--temperature", type = float, default = 0.15, help = "Temperature")
+    legal_nero_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
     legal_nero_parser.set_defaults(func = perform_legal_nero_experiments)
     
     args = parser.parse_args()

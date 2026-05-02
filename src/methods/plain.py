@@ -34,6 +34,10 @@ class PlainNetwork(ABC, pl.LightningModule):
     def forward(self, batch : Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         pass
 
+    # This method is used when embedding a plain model in another, more complex one
+    def compute_total_loss(self, loss : Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        return loss
+
     def perform_step(self, batch : Dict[str, torch.Tensor], step_type : str) -> Dict[str, torch.Tensor]:
         input_ids, attention_mask, labels = self.tokenize_input(batch)
         new_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}

@@ -34,9 +34,11 @@ class MixtureModel(ABC, pl.LightningModule):
             input_ids, attention_mask, labels = model.tokenize_input(x)
             x_prime = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
             preds, probs, loss = model(x_prime)
+            total_loss = model.compute_total_loss(loss)
             all_preds.append(preds)
             all_probs.append(probs)
-            all_losses.append(loss)
+            if total_loss is not None: # this loss is None when the labels are not known
+                all_losses.append(total_loss)
 
         all_probs = torch.stack(all_probs)
         all_losses = torch.stack(all_losses)
@@ -59,16 +61,17 @@ class MixtureModel(ABC, pl.LightningModule):
             input_ids, attention_mask, labels = model.tokenize_input(batch)
             new_batch = {"input_ids": input_ids, "attention_mask": attention_mask, "label": labels}
             preds, probs, loss = model(new_batch)
+            total_loss = model.compute_total_loss(loss) # all labels are known beforehand, so this loss will surely not be None
             all_preds.append(preds)
             all_probs.append(probs)
-            all_losses.append(loss)
+            all_losses.append(total_loss)
         
         all_probs = torch.stack(all_probs)
         all_losses = torch.stack(all_losses)
-        preds, probs, loss = self.voting_mechanism(all_probs, all_losses)
+        preds, probs, final_loss = self.voting_mechanism(all_probs, all_losses)
         
+        self.manual_backward(final_loss)
         for model, optimizer in zip(self.models, optimizers):
-            self.manual_backward(loss)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm = 1.0)
             optimizer.step()
         
@@ -76,7 +79,7 @@ class MixtureModel(ABC, pl.LightningModule):
         if self.logging:
             self.compute_and_log_metrics(preds, labels, "Training")
 
-        return {"pred": preds, "true": labels, "loss": loss}
+        return {"pred": preds, "true": labels, "loss": final_loss}
 
     def evaluation_step(self, batch, step_type : str) -> Dict[str, torch.Tensor]:
         for model in self.models:

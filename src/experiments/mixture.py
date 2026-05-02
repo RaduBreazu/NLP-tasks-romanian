@@ -39,10 +39,13 @@ class LinearVoting(VotingMechanism):
         new_probs = (probs * w_probs).sum(dim = 0)
         new_preds = torch.argmax(new_probs, dim = -1)
         confidence_scores = torch.max(new_probs, dim = -1).values
+        if losses.numel() == 0:
+            return new_preds, confidence_scores, None
+            
         w_losses = self.weights.view(-1, 1) if losses.dim() == 2 else self.weights
         new_losses = (losses * w_losses).sum(dim = 0)
-        
-        return new_preds, confidence_scores, new_losses
+        new_scalar_loss = new_losses.mean() if new_losses.dim() > 0 else new_losses
+        return new_preds, confidence_scores, new_scalar_loss
 
 
 class NERMixture(MixtureModel):
@@ -64,11 +67,11 @@ class NERMixture(MixtureModel):
             filtered_true = []
             filtered_pred = []
             for p, t in zip(pred_seq, true_seq):
-                if t != -100:  # Skip ignored tokens
+                if t != -100:
                     filtered_true.append(to_string_labels(int(t)))
                     filtered_pred.append(to_string_labels(int(p)))
             
-            if filtered_true:  # Only add non-empty sequences
+            if filtered_true:
                 true_labels.append(filtered_true)
                 pred_labels.append(filtered_pred)
 
@@ -263,7 +266,7 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
     legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    legal_nero_parser.add_argument("--temperature", type = float, default = 0.15, help = "Temperature")
+    legal_nero_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     legal_nero_parser.add_argument("--experiment", type = str, default = "ner_simple_models", help = "Experiment name",
                                   choices = ["ner_simple_models", "ner_curriculum", "ner_contrastive", "ner_curriculum_contrastive"])
