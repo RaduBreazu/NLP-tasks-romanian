@@ -12,7 +12,7 @@ class VotingMechanism(ABC):
     def __call__(self, preds, probs, losses) -> None:
         pass
 
-class MixtureModel(ABC, pl.LightningModule):
+class EnsembleModel(ABC, pl.LightningModule):
     def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
         super().__init__()
         self.batch_size = batch_size

@@ -26,7 +26,7 @@ from .plain import NERPlainTagger, FakeNewsPlainDetector
 from .curriculum_learning import NERTeacherModel, NERStudentModel, NERCurriculumLearner, FakeNewsTeacherModel, FakeNewsStudentModel, FakeNewsCurriculumLearner
 from .contrastive_learning import NERContrastive, FakeNewsContrastive
 from .curriculum_and_contrastive import NERCurriculumContrastiveLearner, FakeNewsCurriculumContrastiveLearner
-from .mixture import LinearVoting, NERMixture, FakeNewsMixture
+from .ensemble import LinearVoting, NEREnsemble, FakeNewsEnsemble
 
 class NERSelfTraining(SelfTrainingModel):
     def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, logging: bool, to_string_labels: Callable[[int], str]) -> None:
@@ -123,8 +123,8 @@ def get_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(help = "Task choice. Available options: fake_news, legal_ner")
     
     fake_news_experiment_list = ["fake_news_simple_model", "fake_news_curriculum", "fake_news_contrastive", "fake_news_curriculum_contrastive",
-                                 "fake_news_mixture_simple_models", "fake_news_mixture_curriculum", "fake_news_mixture_contrastive",
-                                 "fake_news_mixture_curriculum_contrastive"]
+                                 "fake_news_ensemble_simple_models", "fake_news_ensemble_curriculum", "fake_news_ensemble_contrastive",
+                                 "fake_news_ensemble_curriculum_contrastive"]
     fake_news_parser = subparsers.add_parser("fake_news")
     fake_news_parser.add_argument("--num_epochs", type = int, default = 20, help = "Number of epochs")
     fake_news_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
@@ -137,8 +137,8 @@ def get_args() -> argparse.Namespace:
     fake_news_parser.add_argument("--experiment", type = str, default = "fake_news_simple_model", help = "Experiment name",
                                   choices = fake_news_experiment_list)
     
-    ner_experiment_list = ["ner_simple_model", "ner_curriculum", "ner_contrastive", "ner_curriculum_contrastive", "ner_mixture_simple_models", "ner_mixture_curriculum",
-                           "ner_mixture_contrastive", "ner_mixture_curriculum_contrastive"]
+    ner_experiment_list = ["ner_simple_model", "ner_curriculum", "ner_contrastive", "ner_curriculum_contrastive", "ner_ensemble_simple_models", "ner_ensemble_curriculum",
+                           "ner_ensemble_contrastive", "ner_ensemble_curriculum_contrastive"]
     legal_nero_parser = subparsers.add_parser("legal_ner")
     legal_nero_parser.add_argument("--num_epochs", type = int, default = 10, help = "Number of epochs")
     legal_nero_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
@@ -197,31 +197,31 @@ def perform_legal_nero_experiments(g : torch.Generator, args : argparse.Namespac
                                            MarcellDataset.to_string_label)
             supervised_model = NERCurriculumContrastiveLearner(student_model, teacher_model, training_args, args.lr, False, MarcellDataset.to_string_label)
             experiment_name = "curriculum and contrastive learning"
-        case "ner_mixture_simple_models":
+        case "ner_ensemble_simple_models":
             expert_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
             experts = [NERPlainTagger(name, num_labels, args.batch_size, args.lr, False, MarcellDataset.to_string_label) for name in expert_names]
-            supervised_model = NERMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of plain experts"
-        case "ner_mixture_curriculum":
+            supervised_model = NEREnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of plain experts"
+        case "ner_ensemble_curriculum":
             expert_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
             experts = [generate_curriculum_learner(name) for name in expert_names]
-            supervised_model = NERMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of curriculum learning experts"
-        case "ner_mixture_contrastive":
+            supervised_model = NEREnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of curriculum learning experts"
+        case "ner_ensemble_contrastive":
             expert_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
             experts = [NERContrastive(name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, False, MarcellDataset.to_string_label)
                        for name in expert_names]
-            supervised_model = NERMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of contrastive learning experts"
-        case "ner_mixture_curriculum_contrastive":
+            supervised_model = NEREnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of contrastive learning experts"
+        case "ner_ensemble_curriculum_contrastive":
             curriculum_learner = generate_curriculum_learner(args.model_name)
             contrastive_learner = NERContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, False,
                                                  MarcellDataset.to_string_label)
             curriculum_contrastive_learner = NERCurriculumContrastiveLearner(deepcopy(contrastive_learner), deepcopy(curriculum_learner.teacher_model), training_args,
                                                                              args.lr, False, MarcellDataset.to_string_label)
             experts = [curriculum_learner, contrastive_learner, curriculum_contrastive_learner]
-            supervised_model = NERMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of curriculum and contrastive learning experts"
+            supervised_model = NEREnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of curriculum and contrastive learning experts"
 
     model = NERSelfTraining(supervised_model, training_data, unlabelled_dataset, args.logging, MarcellDataset.to_string_label)
     aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training of {experiment_name} for NER", "Train_", "Validation_", "Test_")
@@ -270,29 +270,29 @@ def perform_fake_news_experiments(g : torch.Generator, args : argparse.Namespace
             student_model = FakeNewsContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, logging = False)
             supervised_model = FakeNewsCurriculumContrastiveLearner(student_model, teacher_model, training_args, args.lr, logging = False)
             experiment_name = "curriculum and contrastive learning"
-        case "fake_news_mixture_simple_models":
+        case "fake_news_ensemble_simple_models":
             expert_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
             experts = [FakeNewsPlainDetector(name, num_labels, args.batch_size, args.lr, logging = False) for name in expert_names]
-            supervised_model = FakeNewsMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of plain experts"
-        case "fake_news_mixture_curriculum":
+            supervised_model = FakeNewsEnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of plain experts"
+        case "fake_news_ensemble_curriculum":
             expert_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
             experts = [generate_curriculum_learner(name) for name in expert_names]
-            supervised_model = FakeNewsMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of curriculum learning experts"
-        case "fake_news_mixture_contrastive":
+            supervised_model = FakeNewsEnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of curriculum learning experts"
+        case "fake_news_ensemble_contrastive":
             expert_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
             experts = [FakeNewsContrastive(name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, logging = False) for name in expert_names]
-            supervised_model = FakeNewsMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of contrastive learning experts"
-        case "fake_news_mixture_curriculum_contrastive":
+            supervised_model = FakeNewsEnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of contrastive learning experts"
+        case "fake_news_ensemble_curriculum_contrastive":
             curriculum_learner = generate_curriculum_learner(args.model_name)
             contrastive_learner = FakeNewsContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, logging = False)
             curriculum_contrastive_learner = FakeNewsCurriculumContrastiveLearner(deepcopy(contrastive_learner), deepcopy(curriculum_learner.teacher_model),
                                                                                   training_args, args.lr, logging = False)
             experts = [curriculum_learner, contrastive_learner, curriculum_contrastive_learner]
-            supervised_model = FakeNewsMixture(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
-            experiment_name = "mixture of curriculum and contrastive learning experts"
+            supervised_model = FakeNewsEnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), args.lr, logging = False)
+            experiment_name = "ensemble of curriculum and contrastive learning experts"
 
     model = FakeNewsSelfTraining(supervised_model, training_dataset, unlabelled_dataset, args.logging)
     aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training with {experiment_name} for fake news", "Train_", "Validation_", "Test_")

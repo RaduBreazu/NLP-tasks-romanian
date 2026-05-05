@@ -17,7 +17,7 @@ from seqeval.scheme import IOB2
 from . import FakeNewsDataset, read_fake_news_dataset
 from . import MarcellDataset, read_legal_ner_dataset
 
-from . import VotingMechanism, MixtureModel
+from . import VotingMechanism, EnsembleModel
 
 from . import MyCallback
 
@@ -48,7 +48,7 @@ class LinearVoting(VotingMechanism):
         return new_preds, confidence_scores, new_scalar_loss
 
 
-class NERMixture(MixtureModel):
+class NEREnsemble(EnsembleModel):
     def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
         super().__init__(models, batch_size, num_labels, voting_mechanism, learning_rate, logging)
 
@@ -98,7 +98,7 @@ class NERMixture(MixtureModel):
             self.log(f"{step_type} F1 score", f1, prog_bar = True, batch_size = batch_size, on_step = False, on_epoch = True)
     
 
-class FakeNewsMixture(MixtureModel):
+class FakeNewsEnsemble(EnsembleModel):
     def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
         super().__init__(models, batch_size, num_labels, voting_mechanism, learning_rate, logging)
 
@@ -233,11 +233,11 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
     voting_mechanism = LinearVoting(len(models))
     match task:
         case "NER":
-            model = NERMixture(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
+            model = NEREnsemble(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
         case "fake_news":
-            model = FakeNewsMixture(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
+            model = FakeNewsEnsemble(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
         
-    aim_logger = AimLogger(f"aim_logs_mixture_{task}", f"Mixture of experts for {proper_task_name}", "Train_", "Validation_", "Test_")
+    aim_logger = AimLogger(f"aim_logs_ensemble_{task}", f"Ensemble learning for {proper_task_name}", "Train_", "Validation_", "Test_")
     trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)

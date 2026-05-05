@@ -10,7 +10,7 @@ from utils.juro import JuRODataset, read_legal_ner_dataset
 from ..methods.plain import PlainNetwork
 from ..methods.contrastive_learning import ContrastiveNetwork
 from ..methods.curriculum_learning import DifficultyPredictor, CurriculumTagger, CurriculumLearningModel
-from ..methods.mixture import VotingMechanism, MixtureModel
+from ..methods.ensemble import VotingMechanism, EnsembleModel
 from ..methods.self_training import SelfTrainingModel
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
