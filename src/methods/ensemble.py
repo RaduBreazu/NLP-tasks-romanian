@@ -13,7 +13,7 @@ class VotingMechanism(ABC):
         pass
 
 class EnsembleModel(ABC, pl.LightningModule):
-    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
+    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, logging : bool) -> None:
         super().__init__()
         self.batch_size = batch_size
         self.num_labels = num_labels
@@ -22,7 +22,6 @@ class EnsembleModel(ABC, pl.LightningModule):
 
         self.automatic_optimization = False
         self.voting_mechanism = voting_mechanism
-        self.learning_rate = learning_rate
         self.logging = logging
 
     # Attention: the loss computed here must be differentiable!
@@ -107,7 +106,7 @@ class EnsembleModel(ABC, pl.LightningModule):
         schedulers = []
 
         for model in self.models:
-            opt = torch.optim.AdamW(model.parameters(), lr = self.learning_rate, weight_decay = 0.01)
+            opt = torch.optim.AdamW(model.parameters(), lr = model.learning_rate, weight_decay = 0.01)
             sched = torch.optim.lr_scheduler.StepLR(opt, step_size = 1, gamma = 0.95)
             optimizers.append(opt)
             schedulers.append({"scheduler": sched, "interval": "epoch", "frequency": 1})

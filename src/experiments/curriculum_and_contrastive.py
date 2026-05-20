@@ -41,7 +41,7 @@ def get_args() -> argparse.Namespace:
     fake_news_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-cased-v1", help = "Name of pretrained model to be used")
     fake_news_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     fake_news_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    fake_news_parser.add_argument("--temperature", type = float, default = 0.1, help = "Temperature")
+    fake_news_parser.add_argument("--temperature", type = float, default = 0.15, help = "Temperature")
     fake_news_parser.set_defaults(func = perform_fake_news_experiments)
     
     legal_nero_parser = subparsers.add_parser("legal_ner")
@@ -51,8 +51,8 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
-    legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    legal_nero_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
+    legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.2, help = "Importance of contrastive loss in total loss")
+    legal_nero_parser.add_argument("--temperature", type = float, default = 0.05, help = "Temperature")
     legal_nero_parser.set_defaults(func = perform_legal_nero_experiments)
     
     args = parser.parse_args()

@@ -1,0 +1,11 @@
+.vscode/
+.vscode/*
+src/experiments/__pycache__/*
+src/experiments/__pycache__/
+src/methods/__pycache__/*
+src/methods/__pycache__/
+utils/__pycache__/*
+utils/__pycache__/
+aim_logs_*
+outputs/*
+outputs

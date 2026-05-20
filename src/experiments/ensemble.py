@@ -49,8 +49,8 @@ class LinearVoting(VotingMechanism):
 
 
 class NEREnsemble(EnsembleModel):
-    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
-        super().__init__(models, batch_size, num_labels, voting_mechanism, learning_rate, logging)
+    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, logging : bool) -> None:
+        super().__init__(models, batch_size, num_labels, voting_mechanism, logging)
 
     def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
         if isinstance(y_pred, torch.Tensor):
@@ -99,8 +99,8 @@ class NEREnsemble(EnsembleModel):
     
 
 class FakeNewsEnsemble(EnsembleModel):
-    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, learning_rate: float, logging : bool) -> None:
-        super().__init__(models, batch_size, num_labels, voting_mechanism, learning_rate, logging)
+    def __init__(self, models: List[pl.LightningModule], batch_size : int, num_labels : int, voting_mechanism : VotingMechanism, logging : bool) -> None:
+        super().__init__(models, batch_size, num_labels, voting_mechanism, logging)
 
         metrics = MetricCollection({
             "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
@@ -173,69 +173,69 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
     validation_dataloader = DataLoader(validation_dataset, shuffle = False, **training_args)
     test_dataloader = DataLoader(test_dataset, shuffle = False, **training_args)
 
-    def generate_curriculum_learner(type : str, model_name : str) -> NERCurriculumLearner | FakeNewsCurriculumLearner:
+    def generate_curriculum_learner(type : str, model_name : str, lr: float) -> NERCurriculumLearner | FakeNewsCurriculumLearner:
         match type:
             case "NER":
                 curriculum_teacher_model = NERTeacherModel(model_name)
                 curriculum_student_model = NERStudentModel(model_name, training_dataset, num_labels, args.batch_size)
-                curriculum_learner = NERCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, args.lr, False,
+                curriculum_learner = NERCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, lr, False,
                                                           MarcellDataset.to_string_label)
             case "fake_news":
                 curriculum_teacher_model = FakeNewsTeacherModel(model_name)
                 curriculum_student_model = FakeNewsStudentModel(model_name, training_dataset, num_labels, args.batch_size)
-                curriculum_learner = FakeNewsCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, args.lr, False)
+                curriculum_learner = FakeNewsCurriculumLearner(curriculum_student_model, curriculum_teacher_model, training_args, lr, False)
         
         return curriculum_learner
     
     match args.experiment:
         case "ner_simple_models":
             model_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
-            models = [NERPlainTagger(name, MarcellDataset.num_labels, args.batch_size, args.lr, False, MarcellDataset.to_string_label) for name in model_names]
+            models = [NERPlainTagger(name, MarcellDataset.num_labels, args.batch_size, lr, False, MarcellDataset.to_string_label) for name, lr in zip(model_names, args.lr)]
             proper_task_name = "NER"
         case "ner_curriculum":
             model_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
-            models = [generate_curriculum_learner("NER", name) for name in model_names]
+            models = [generate_curriculum_learner("NER", name, lr) for name, lr in zip(model_names, args.lr)]
             proper_task_name = "NER"
         case "ner_contrastive":
             model_names = ["dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-ner", "dumitrescustefan/bert-base-romanian-uncased-v1"]
-            models = [NERContrastive(name, MarcellDataset.num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, False,
-                                     MarcellDataset.to_string_label) for name in model_names]
+            models = [NERContrastive(name, MarcellDataset.num_labels, args.batch_size, lr, args.contrastive_weight, args.temperature, False,
+                                     MarcellDataset.to_string_label) for name, lr in zip(model_names, args.lr)]
             proper_task_name = "NER"
         case "ner_curriculum_contrastive":
-            curriculum_learner = generate_curriculum_learner("NER", args.model_name)
-            contrastive_learner = NERContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, args.logging,
+            curriculum_learner = generate_curriculum_learner("NER", args.model_name, args.lr[0])
+            contrastive_learner = NERContrastive(args.model_name, num_labels, args.batch_size, args.lr[0], args.contrastive_weight, args.temperature, args.logging,
                                                  MarcellDataset.to_string_label)
             curriculum_contrastive_learner = NERCurriculumContrastiveLearner(deepcopy(contrastive_learner), deepcopy(curriculum_learner.teacher_model), training_args,
-                                                                             args.lr, False, MarcellDataset.collator)
+                                                                             args.lr[0], False, MarcellDataset.collator)
             models = [curriculum_learner, contrastive_learner, curriculum_contrastive_learner]
             proper_task_name = "NER"
         case "fake_news_simple_models":
             model_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
-            models = [FakeNewsPlainDetector(name, FakeNewsDataset.num_labels, args.batch_size, args.lr, logging = False) for name in model_names]
+            models = [FakeNewsPlainDetector(name, FakeNewsDataset.num_labels, args.batch_size, lr, logging = False) for name, lr in zip(model_names, args.lr)]
             proper_task_name = "fake news detection"
         case "fake_news_curriculum":
             model_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
-            models = [generate_curriculum_learner("fake_news", name) for name in model_names]
+            models = [generate_curriculum_learner("fake_news", name, lr) for name, lr in zip(model_names, args.lr)]
             proper_task_name = "fake news detection"
         case "fake_news_contrastive":
             model_names = ["dumitrescustefan/bert-base-romanian-cased-v1", "readerbench/RoBERT-base", "readerbench/RoBERT-large"]
-            models = [FakeNewsContrastive(name, FakeNewsDataset.num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, logging = False)
-                      for name in model_names]
+            models = [FakeNewsContrastive(name, FakeNewsDataset.num_labels, args.batch_size, lr, args.contrastive_weight, args.temperature, logging = False)
+                      for name, lr in zip(model_names, args.lr)]
             proper_task_name = "fake_news"
         case "fake_news_curriculum_contrastive":
-            curriculum_learner = generate_curriculum_learner("fake_news", args.model_name)
-            contrastive_learner = FakeNewsContrastive(args.model_name, num_labels, args.batch_size, args.lr, args.contrastive_weight, args.temperature, logging = False)
+            curriculum_learner = generate_curriculum_learner("fake_news", args.model_name, args.lr[0])
+            contrastive_learner = FakeNewsContrastive(args.model_name, num_labels, args.batch_size, args.lr[0], args.contrastive_weight, args.temperature, logging = False)
             curriculum_contrastive_learner = FakeNewsCurriculumContrastiveLearner(deepcopy(curriculum_learner.student_model), deepcopy(curriculum_learner.teacher_model),
-                                                                                  training_args, args.lr, logging = False)
+                                                                                  training_args, args.lr[0], logging = False)
             models = [curriculum_learner, contrastive_learner, curriculum_contrastive_learner]
             proper_task_name = "fake news detection"
     
     voting_mechanism = LinearVoting(len(models))
     match task:
         case "NER":
-            model = NEREnsemble(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
+            model = NEREnsemble(models, args.batch_size, num_labels, voting_mechanism, args.logging)
         case "fake_news":
-            model = FakeNewsEnsemble(models, args.batch_size, num_labels, voting_mechanism, args.lr, args.logging)
+            model = FakeNewsEnsemble(models, args.batch_size, num_labels, voting_mechanism, args.logging)
         
     aim_logger = AimLogger(f"aim_logs_ensemble_{task}", f"Ensemble learning for {proper_task_name}", "Train_", "Validation_", "Test_")
     trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
@@ -250,11 +250,11 @@ def get_args() -> argparse.Namespace:
     fake_news_parser = subparsers.add_parser("fake_news")
     fake_news_parser.add_argument("--num_epochs", type = int, default = 20, help = "Number of epochs")
     fake_news_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
-    fake_news_parser.add_argument("--lr", type = float, default = 1e-4, help = "Learning rate")
+    fake_news_parser.add_argument("--lr", type = str, default = "[1e-4, 5e-5, 2e-5]", help = "Learning rates of models")
     fake_news_parser.add_argument("--batch_size", type = int, default = 16, help = "Batch size")
     fake_news_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-cased-v1", help = "Name of pretrained model to be used")
     fake_news_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    fake_news_parser.add_argument("--temperature", type = float, default = 0.1, help = "Temperature")
+    fake_news_parser.add_argument("--temperature", type = float, default = 0.15, help = "Temperature")
     fake_news_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     fake_news_parser.add_argument("--experiment", type = str, default = "fake_news_simple_models", help = "Experiment name",
                                   choices = ["fake_news_simple_models", "fake_news_curriculum", "fake_news_contrastive", "fake_news_curriculum_contrastive"])
@@ -262,16 +262,17 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser = subparsers.add_parser("legal_ner")
     legal_nero_parser.add_argument("--num_epochs", type = int, default = 10, help = "Number of epochs")
     legal_nero_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
-    legal_nero_parser.add_argument("--lr", type = float, default = 2e-5, help = "Learning rate")
+    legal_nero_parser.add_argument("--lr", type = str, default = "[2e-5, 2e-5, 2e-5]", help = "Learning rates of models")
     legal_nero_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
-    legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
-    legal_nero_parser.add_argument("--temperature", type = float, default = 0.07, help = "Temperature")
+    legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.2, help = "Importance of contrastive loss in total loss")
+    legal_nero_parser.add_argument("--temperature", type = float, default = 0.05, help = "Temperature")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
     legal_nero_parser.add_argument("--experiment", type = str, default = "ner_simple_models", help = "Experiment name",
                                   choices = ["ner_simple_models", "ner_curriculum", "ner_contrastive", "ner_curriculum_contrastive"])
     
     args = parser.parse_args()
+    args.lr = [float(x) for x in args.lr[1:-1].split(", ")] # parse learning rates as a list of float numbers
     return args
 
 def main() -> None:
