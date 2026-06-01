@@ -13,12 +13,13 @@ from .plain import PlainNetwork
 from .contrastive_learning import ContrastiveNetwork
 
 class SelfTrainingModel(ABC, pl.LightningModule):
-    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, inner_epochs: int, logging: bool) -> None:
+    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, inner_epochs: int, threshold: float, logging: bool) -> None:
         super().__init__()
         self.model = model
         self.labelled_data = labelled_data
         self.unlabelled_data = unlabelled_data
         self.inner_epochs = inner_epochs
+        self.threshold = threshold
         
         self.automatic_optimization = isinstance(model, PlainNetwork) or isinstance(model, ContrastiveNetwork)
         self.batch_size = self.model.batch_size
@@ -44,8 +45,8 @@ class SelfTrainingModel(ABC, pl.LightningModule):
                         preds = out[0]
                         probs = out[1]
                         
-                        # if the probability for a certain example is above a certain threshold (say 0.95), label the example with the predicted tag
-                        prob_mask = probs >= 0.95
+                        # if the probability for a certain example is above a certain threshold, label the example with the predicted tag
+                        prob_mask = probs >= self.threshold
                         if prob_mask.any():
                             high_conf_indices = torch.where(prob_mask)[0].cpu().numpy()
                             for idx in high_conf_indices:

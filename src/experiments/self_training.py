@@ -29,9 +29,9 @@ from .curriculum_and_contrastive import NERCurriculumContrastiveLearner, FakeNew
 from .ensemble import LinearVoting, NEREnsemble, FakeNewsEnsemble
 
 class NERSelfTraining(SelfTrainingModel):
-    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, inner_epochs: int, logging: bool,
+    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, inner_epochs: int, threshold: float, logging: bool,
                  to_string_labels: Callable[[int], str]) -> None:
-        super().__init__(model, labelled_data, unlabelled_data, inner_epochs, logging)
+        super().__init__(model, labelled_data, unlabelled_data, inner_epochs, threshold, logging)
         self.to_string_labels = to_string_labels
 
     def filter_out_padding_tokens(self, y_pred, y_true) -> Tuple[List[List[str]], List[List[str]]]:
@@ -79,8 +79,8 @@ class NERSelfTraining(SelfTrainingModel):
 
 
 class FakeNewsSelfTraining(SelfTrainingModel):
-    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, inner_epochs: int, logging: bool) -> None:
-        super().__init__(model, labelled_data, unlabelled_data, inner_epochs, logging)
+    def __init__(self, model: pl.LightningModule, labelled_data: Dataset, unlabelled_data: Dataset, inner_epochs: int, threshold: float, logging: bool) -> None:
+        super().__init__(model, labelled_data, unlabelled_data, inner_epochs, threshold, logging)
 
         metrics = MetricCollection({
             "accuracy": Accuracy(task = "multiclass", num_classes = self.num_labels, average = "macro"),
@@ -127,7 +127,7 @@ def get_args() -> argparse.Namespace:
                                  "fake_news_ensemble_simple_models", "fake_news_ensemble_curriculum", "fake_news_ensemble_contrastive",
                                  "fake_news_ensemble_curriculum_contrastive"]
     fake_news_parser = subparsers.add_parser("fake_news")
-    fake_news_parser.add_argument("--num_epochs", type = int, default = 10, help = "Number of epochs")
+    fake_news_parser.add_argument("--num_epochs", type = int, default = 7, help = "Number of epochs")
     fake_news_parser.add_argument("--num_inner_epochs", type = int, default = 4, help = "Number of base model epochs per large model epochs")
     fake_news_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
     fake_news_parser.add_argument("--lr", type = str, default = "[1e-4, 5e-5, 2e-5]", help = "Learning rates of the models")
@@ -136,21 +136,23 @@ def get_args() -> argparse.Namespace:
     fake_news_parser.add_argument("--contrastive_weight", type = float, default = 0.3, help = "Importance of contrastive loss in total loss")
     fake_news_parser.add_argument("--temperature", type = float, default = 0.15, help = "Temperature")
     fake_news_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
+    fake_news_parser.add_argument("--threshold", type = float, default = 0.95, help = "Minimal pseudo-label quality in order for examples to be included in training set")
     fake_news_parser.add_argument("--experiment", type = str, default = "fake_news_simple_model", help = "Experiment name",
                                   choices = fake_news_experiment_list)
     
     ner_experiment_list = ["ner_simple_model", "ner_curriculum", "ner_contrastive", "ner_curriculum_contrastive", "ner_ensemble_simple_models", "ner_ensemble_curriculum",
                            "ner_ensemble_contrastive", "ner_ensemble_curriculum_contrastive"]
     legal_nero_parser = subparsers.add_parser("legal_ner")
-    legal_nero_parser.add_argument("--num_epochs", type = int, default = 5, help = "Number of epochs")
+    legal_nero_parser.add_argument("--num_epochs", type = int, default = 7, help = "Number of epochs")
     legal_nero_parser.add_argument("--num_inner_epochs", type = int, default = 4, help = "Number of base model epochs per large model epochs")
     legal_nero_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
     legal_nero_parser.add_argument("--lr", type = str, default = "[2e-5, 2e-5, 2e-5]", help = "Learning rates of the models")
-    legal_nero_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
+    legal_nero_parser.add_argument("--batch_size", type = int, default = 16, help = "Batch size")
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
     legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.2, help = "Importance of contrastive loss in total loss")
     legal_nero_parser.add_argument("--temperature", type = float, default = 0.05, help = "Temperature")
     legal_nero_parser.add_argument("--logging", type = bool, default = True, help = "Whether or not to log the results of the experiments")
+    legal_nero_parser.add_argument("--threshold", type = float, default = 0.95, help = "Minimal pseudo-label quality in order for examples to be included in training set")
     legal_nero_parser.add_argument("--experiment", type = str, default = "ner_simple_model", help = "Experiment name",
                                   choices = ner_experiment_list)
     
@@ -227,7 +229,7 @@ def perform_legal_nero_experiments(g : torch.Generator, args : argparse.Namespac
             supervised_model = NEREnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), logging = False)
             experiment_name = "ensemble of curriculum and contrastive learning experts"
 
-    model = NERSelfTraining(supervised_model, training_data, unlabelled_dataset, args.num_inner_epochs, args.logging, MarcellDataset.to_string_label)
+    model = NERSelfTraining(supervised_model, training_data, unlabelled_dataset, args.num_inner_epochs, args.threshold, args.logging, MarcellDataset.to_string_label)
     aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training of {experiment_name} for NER", "Train_", "Validation_", "Test_")
     trainer = pl.Trainer(max_epochs = args.num_epochs * args.num_inner_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
@@ -298,7 +300,7 @@ def perform_fake_news_experiments(g : torch.Generator, args : argparse.Namespace
             supervised_model = FakeNewsEnsemble(experts, args.batch_size, num_labels, LinearVoting(len(experts)), logging = False)
             experiment_name = "ensemble of curriculum and contrastive learning experts"
 
-    model = FakeNewsSelfTraining(supervised_model, training_dataset, unlabelled_dataset, args.num_inner_epochs, args.logging)
+    model = FakeNewsSelfTraining(supervised_model, training_dataset, unlabelled_dataset, args.num_inner_epochs, args.threshold, args.logging)
     aim_logger = AimLogger(f"aim_logs_self_training_{args.experiment}", f"Self-training with {experiment_name} for fake news", "Train_", "Validation_", "Test_")
     trainer = pl.Trainer(max_epochs = args.num_epochs * args.num_inner_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)

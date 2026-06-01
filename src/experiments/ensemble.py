@@ -4,6 +4,7 @@ import torch
 import pytorch_lightning as pl
 from aim.pytorch_lightning import AimLogger
 from copy import deepcopy
+from math import ceil
 
 from typing import List, Dict, Tuple, Any
 
@@ -237,8 +238,9 @@ def perform_experiments(g : torch.Generator, args : argparse.Namespace, task : s
         case "fake_news":
             model = FakeNewsEnsemble(models, args.batch_size, num_labels, voting_mechanism, args.logging)
         
+    num_batches = ceil(len(training_dataset) / args.batch_size)
     aim_logger = AimLogger(f"aim_logs_ensemble_{task}", f"Ensemble learning for {proper_task_name}", "Train_", "Validation_", "Test_")
-    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = 1, callbacks = [MyCallback()])
+    trainer = pl.Trainer(max_epochs = args.num_epochs, deterministic = True, logger = aim_logger, log_every_n_steps = num_batches, callbacks = [MyCallback()])
     trainer.fit(model, train_dataloader, validation_dataloader)
     trainer.validate(model, validation_dataloader)
     trainer.test(model, test_dataloader)
@@ -263,7 +265,7 @@ def get_args() -> argparse.Namespace:
     legal_nero_parser.add_argument("--num_epochs", type = int, default = 10, help = "Number of epochs")
     legal_nero_parser.add_argument("--num_workers", type = int, default = 4, help = "Number of workers")
     legal_nero_parser.add_argument("--lr", type = str, default = "[2e-5, 2e-5, 2e-5]", help = "Learning rates of models")
-    legal_nero_parser.add_argument("--batch_size", type = int, default = 32, help = "Batch size")
+    legal_nero_parser.add_argument("--batch_size", type = int, default = 16, help = "Batch size")
     legal_nero_parser.add_argument("--model_name", type = str, default = "dumitrescustefan/bert-base-romanian-ner", help = "Name of pretrained model to be used")
     legal_nero_parser.add_argument("--contrastive_weight", type = float, default = 0.2, help = "Importance of contrastive loss in total loss")
     legal_nero_parser.add_argument("--temperature", type = float, default = 0.05, help = "Temperature")
