@@ -86,7 +86,15 @@ def read_fake_news_dataset() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, 
 
     return labelled_data, validation_data, test_data, unlabelled_data
 
-def main() -> None:
+def print_dataset_statistics() -> None:
+    train_data, validation_data, test_data, unlabelled_data = read_fake_news_dataset()
+    print("Dataset statistics:")
+    print(f"Training data: {len(train_data)} articles")
+    print(f"Validation data: {len(validation_data)} articles")
+    print(f"Test data: {len(test_data)} articles")
+    print(f"Unlabelled data: {len(unlabelled_data)} articles")
+
+def test_interaction_with_dataset() -> None:
     def print_dict(d):
         for k, v in d.items():
             print(f"{k}: {v}")
@@ -96,6 +104,13 @@ def main() -> None:
     print(train_dataset[4])
     print(type(train_dataset[0:16]["body"]))
     print(print_dict(FakeNewsDataset.collator(train_data[0:16])))
+
+def main() -> None:
+    print_statistics = True
+    if print_statistics:
+        print_dataset_statistics()
+    else:
+        test_interaction_with_dataset()
 
 if __name__ == "__main__":
     main()

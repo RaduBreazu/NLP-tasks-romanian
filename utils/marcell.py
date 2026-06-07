@@ -72,15 +72,35 @@ def read_legalnero_dataset() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
     return train_data, validation_data, test_data
 
-def main() -> None:
+def get_num_tokens(df : pd.DataFrame) -> Tuple[int, int]:
+    total_tokens = sum(df["label"].apply(len))
+    named_entity_tokens = sum(df["label"].apply(lambda arr: len(arr[arr != "O"])))
+    return total_tokens, named_entity_tokens
+
+def print_dataset_statistics() -> None:
+    train_data, validation_data, test_data = read_legalnero_dataset()
+    print("Dataset statistics:")
+    [train_tokens, validation_tokens, test_tokens] = [get_num_tokens(data) for data in [train_data, validation_data, test_data]]
+    print(f"Training data: {len(train_data)} samples, {train_tokens[0]} total tokens, {train_tokens[1]} named entity tokens")
+    print(f"Validation data: {len(validation_data)} samples, {validation_tokens[0]} total tokens, {validation_tokens[1]} named entity tokens")
+    print(f"Test data: {len(test_data)} samples, {test_tokens[0]} total tokens, {test_tokens[1]} named entity tokens")
+
+def test_interaction_with_dataset() -> None:
     def print_dict(d):
         for k, v in d.items():
             print(f"{k}: {v}")
-
+    
     train_data, validation_data, test_data = read_legalnero_dataset()
     train_dataset = MarcellDataset(train_data)
     print(train_dataset[4])
     print(print_dict(MarcellDataset.collator(train_dataset[0:16])))
+
+def main() -> None:
+    print_statistics = True
+    if print_statistics:
+        print_dataset_statistics()
+    else:
+        test_interaction_with_dataset()
 
 if __name__ == "__main__":
     main()
