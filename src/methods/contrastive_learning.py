@@ -28,22 +28,22 @@ class ContrastiveLoss(nn.Module):
         
         sim_matrix = torch.matmul(features, weights.T) / self.temperature
         
-        # --- L_z: Sample-to-Label Loss ---
+        # --- L_z: Example-to-Label Loss ---
         # We compute the cross-entropy loss in order to determine the correct label for each example (row in the similarity matrix)
         loss_z = F.cross_entropy(sim_matrix, labels)
         
-        # --- L_theta: Label-to-Sample Loss ---
-        # For each class (column), we want to identify which samples (rows) belong to it
-        # We observe that (features @ weights.T).T = weights @ features.T, which is the similarity matrix between the weights and the features
+        # --- L_theta: Label-to-Example Loss ---
+        # For each class (column), we want to identify which examples (rows) belong to it
+        # We observe that (features @ weights.T).T = weights @ features.T, so we just need to transpose `sim_matrix` from before
         sim_matrix_theta = sim_matrix.T # [C, N]
         
-        # Binary mask where mask[j, i] = 1 if sample i has label j --> mask shape: [C, N]
+        # Binary mask where mask[j, i] = 1 if example i has label j --> mask shape: [C, N]
         adj_mask = (labels.unsqueeze(0) == torch.arange(weights.size(0), device = labels.device).unsqueeze(1)).float()
         
-        # We use a log-sum-exp approach for the denominator across samples
+        # We use a log-sum-exp approach for the denominator across examples
         log_prob_theta = F.log_softmax(sim_matrix_theta, dim = 1)
         
-        # Multiply by mask to keep only correct sample-label pairs, then average
+        # Multiply by mask to keep only correct example-label pairs, then average
         # We divide by the sum of the mask to get the mean per class that exists in the batch
         loss_theta = -(adj_mask * log_prob_theta).sum(dim = 1) / (adj_mask.sum(dim = 1) + 1e-10)
         loss_theta = loss_theta.mean()

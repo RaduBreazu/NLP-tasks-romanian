@@ -38,9 +38,9 @@ class SelfTrainingModel(ABC, pl.LightningModule):
                     new_data = self.labelled_data.data
                     unlabelled_dataloader = DataLoader(self.unlabelled_data, batch_size = curr_loader.batch_size, shuffle = False, collate_fn = self.unlabelled_data.collator)
                     pseudo_labelled_examples = []
-                    all_high_conf_indices = []
+                    selected_indices = []
                     
-                    for batch_idx, batch in enumerate(unlabelled_dataloader):
+                    for batch in unlabelled_dataloader:
                         out = self.model(batch) # the `forward` method of the model must return preds, probs and loss (if available) in this order
                         preds = out[0]
                         probs = out[1]
@@ -48,10 +48,15 @@ class SelfTrainingModel(ABC, pl.LightningModule):
                         # if the probability for a certain example is above a certain threshold, label the example with the predicted tag
                         prob_mask = probs >= self.threshold
                         if prob_mask.any():
-                            high_conf_indices = torch.where(prob_mask)[0].cpu().numpy()
+                            batch_indices = batch.get("idx", None)
+                            high_conf_indices = torch.where(prob_mask)[0]
                             for idx in high_conf_indices:
-                                all_high_conf_indices.append(batch_idx * self.batch_size + idx)
-                                example = {k : v[idx] for k, v in batch.items() if k != "label"}
+                                if batch_indices is not None:
+                                    raw_idx = batch_indices[idx].item() if isinstance(batch_indices[idx], torch.Tensor) else batch_indices[idx]
+                                else:
+                                    raw_idx = idx.item()
+                                selected_indices.append(raw_idx)
+                                example = {k : v[idx] for k, v in batch.items() if k not in {"label", "idx"}}
                                 example["label"] = preds[idx].item()
                                 pseudo_labelled_examples.append(example)
 
@@ -68,20 +73,19 @@ class SelfTrainingModel(ABC, pl.LightningModule):
                     "generator": curr_loader.generator
                 }
                 self.labelled_data.data = new_data
-                self.unlabelled_data.data = self.unlabelled_data.data.drop(index = all_high_conf_indices).reset_index(drop = True)
+                self.unlabelled_data.data = self.unlabelled_data.data.drop(index = selected_indices)
                 return DataLoader(self.labelled_data, **loader_args)
             else:
                 return DataLoader(self.labelled_data, batch_size = self.batch_size, shuffle = True, collate_fn = self.labelled_data.collator)
         
-        else:
-            if self.trainer is not None:
-                if hasattr(self.trainer, "train_dataloader"):
-                    return self.trainer.train_dataloader
-                
-                return DataLoader(self.labelled_data, batch_size = self.batch_size, shuffle = True, collate_fn = self.labelled_data.collator)
+        elif self.trainer is not None:
+            if hasattr(self.trainer, "train_dataloader"):
+                return self.trainer.train_dataloader
             
-            else:
-                return DataLoader(self.labelled_data, batch_size = self.batch_size, shuffle = True, collate_fn = self.labelled_data.collator)
+            return DataLoader(self.labelled_data, batch_size = self.batch_size, shuffle = True, collate_fn = self.labelled_data.collator)
+            
+        else:
+            return DataLoader(self.labelled_data, batch_size = self.batch_size, shuffle = True, collate_fn = self.labelled_data.collator)
 
     def perform_step(self, batch, batch_idx: int, step_type: str) -> Dict[str, torch.Tensor]:
         match step_type:

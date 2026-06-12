@@ -12,7 +12,7 @@ class FakeNewsDataset(Dataset):
     def __init__(self, data : pd.DataFrame) -> None:
         data["headline"] = data["headline"].str.replace("ţ", "ț").replace("ş", "ș").replace("Ţ", "Ț").replace("Ş", "Ș")
         data["body"] = data["body"].str.replace("ţ", "ț").replace("ş", "ș").replace("Ţ", "Ț").replace("Ş", "Ș")
-        try:
+        if "label" in data:
             to_int_labels = {
                 'Știre reală': 0,
                 'Narațiuni legate de vaccinare': 1,
@@ -26,28 +26,25 @@ class FakeNewsDataset(Dataset):
                 'Criticarea actorilor naționali și internaționali': 9
             }
             data["label"] = data["label"].map(to_int_labels)
-        except KeyError:
-            pass
-        finally:
-            self.data = data
+        
+        self.data = data
 
     def __len__(self) -> int:
         return len(self.data)
     
     def __getitem__(self, idx : int) -> Dict[str, str | int]:
         row = self.data.iloc[idx, :]
-        output = {"headline": row["headline"], "body": row["body"]}
-        try:
+        output = {"idx": idx, "headline": row["headline"], "body": row["body"]}
+        if "label" in row:
             label = row["label"]
             output["label"] = label
-        except KeyError:
-            pass
-        finally:
-            return output
+        
+        return output
         
     @staticmethod
     def collator(batch : List[Dict[str, str | int]]) -> Dict[str, List[str] | List[int]]:
         return {
+            "idx": [item["idx"] for item in batch],
             "text": [item["headline"] + "\n" + item["body"] for item in batch],
             "label": [item["label"] for item in batch]
         }

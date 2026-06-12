@@ -18,11 +18,11 @@ class JuRODataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, str | int]:
         row = self.data.iloc[idx, :]
-        return {"text": row["text"]}
+        return {"idx": idx, "text": row["text"]}
     
     @staticmethod
     def collator(batch : List[Dict[str, str | int]]) -> Dict[str, List[str] | List[int]]:
-        return {"text": [item["text"] for item in batch]}
+        return {"idx": [item["idx"] for item in batch], "text": [item["text"] for item in batch]}
 
 
 def get_all_filenames(type : str) -> List[str]:

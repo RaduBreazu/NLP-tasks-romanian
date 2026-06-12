@@ -122,8 +122,7 @@ class NERContrastive(ContrastiveNetwork):
 
 
 class FakeNewsContrastive(ContrastiveNetwork):
-    def __init__(self, model_name: str, num_labels: int, batch_size: int, learning_rate: float, contrastive_weight: float, temperature: float,
-                 logging : bool) -> None:
+    def __init__(self, model_name: str, num_labels: int, batch_size: int, learning_rate: float, contrastive_weight: float, temperature: float, logging : bool) -> None:
         super().__init__(model_name, num_labels, batch_size, learning_rate, contrastive_weight, temperature, logging)
         
         metrics = MetricCollection({

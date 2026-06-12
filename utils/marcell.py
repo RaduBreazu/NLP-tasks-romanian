@@ -33,11 +33,11 @@ class MarcellDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, str | int]:
         row = self.data.iloc[idx, :]
-        return {"text": row["text"], "label": row["label"]}
+        return {"idx": idx, "text": row["text"], "label": row["label"]}
     
     @staticmethod
     def collator(batch : List[Dict[str, str | int]]) -> Dict[str, List[str] | List[int]]:
-        return {"text": [item["text"] for item in batch], "label": [item["label"] for item in batch]}
+        return {"idx": [item["idx"] for item in batch], "text": [item["text"] for item in batch], "label": [item["label"] for item in batch]}
     
     @staticmethod
     def to_string_label(label : int) -> str:
