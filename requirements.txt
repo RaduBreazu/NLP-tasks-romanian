@@ -1,0 +1,11 @@
+tqdm
+numpy
+pandas
+scikit-learn
+datasets
+torchmetrics
+transformers
+pytorch-lightning
+aim
+seqeval
+accelerate
